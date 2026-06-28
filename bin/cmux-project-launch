@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: cmux-project-launch <project>
+
+Creates a cmux workspace with Codex and Claude panes, then sends:
+  Codex: $start <project>
+  Claude: /start <project>
+
+Environment:
+  CMUX_PROJECT_LAUNCHER_CMUX     cmux CLI path
+  CMUX_PROJECT_LAUNCHER_WAIT     seconds to wait before post-boot sends (default: 8)
+  CMUX_PROJECT_LAUNCHER_POLL     seconds to poll read-screen before fallback (default: 45)
+  CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX
+                                  readiness regex for Codex read-screen polling
+  CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX
+                                  readiness regex for Claude read-screen polling
+  CMUX_PROJECT_LAUNCHER_PROMOTE_WAIT
+                                  seconds to poll after one focus/refresh promotion attempt
+  CMUX_PROJECT_LAUNCHER_ENTER_DELAY
+                                  seconds between prompt text send and Enter key (default: 0.5)
+  CMUX_PROJECT_LAUNCHER_ENTER_RETRIES
+                                  Enter key attempts while confirming submit (default: 3)
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT
+                                  seconds to wait after each Enter for submit proof (default: 4)
+  CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE
+                                  keep a failed cmux workspace for debugging
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT  AMQ base root for session allocation
+  CMUX_PROJECT_LAUNCHER_AMQ       AMQ CLI path for session allocation
+  CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS
+                                  colon-separated AMQ paths or dirs for GUI PATH fallback
+  CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT
+                                  workspace root for coop launchers (default: ~/git)
+  CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER
+                                  Codex shell function or executable (default: coopcodex)
+  CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER
+                                  Claude shell function or executable (default: coopcc)
+  CMUX_PROJECT_LAUNCHER_OPEN      open CLI path for app activation
+  CMUX_PROJECT_LAUNCHER_DRY_RUN  print planned commands without launching
+USAGE
+}
+
+if [[ $# -ne 1 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 2
+fi
+
+project="$1"
+if [[ ! "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "Invalid project name: $project" >&2
+  exit 2
+fi
+
+cmux_bin="${CMUX_PROJECT_LAUNCHER_CMUX:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
+amq_bin="${CMUX_PROJECT_LAUNCHER_AMQ:-amq}"
+open_bin="${CMUX_PROJECT_LAUNCHER_OPEN:-/usr/bin/open}"
+workspace_root="${CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT:-$HOME/git}"
+codex_launcher="${CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER:-coopcodex}"
+claude_launcher="${CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER:-coopcc}"
+wait_seconds="${CMUX_PROJECT_LAUNCHER_WAIT:-8}"
+poll_seconds="${CMUX_PROJECT_LAUNCHER_POLL:-45}"
+codex_ready_regex="${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
+claude_ready_regex="${CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX:-Claude Code|Welcome to Claude|Opus [0-9]|Sonnet [0-9]|bypass permissions}"
+promote_wait_seconds="${CMUX_PROJECT_LAUNCHER_PROMOTE_WAIT:-5}"
+enter_delay_seconds="${CMUX_PROJECT_LAUNCHER_ENTER_DELAY:-0.5}"
+enter_retries="${CMUX_PROJECT_LAUNCHER_ENTER_RETRIES:-3}"
+submit_confirm_wait_seconds="${CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT:-4}"
+input_probe_lines="${CMUX_PROJECT_LAUNCHER_INPUT_LINES:-18}"
+keep_failed_workspace="${CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE:-0}"
+dry_run="${CMUX_PROJECT_LAUNCHER_DRY_RUN:-0}"
+workspace_ref=""
+launch_ok=0
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=bin/lib/cmux-project-common.sh
+source "$script_dir/lib/cmux-project-common.sh"
+workspace_root="$(expand_path "$workspace_root")"
+validate_launcher_word "$codex_launcher" "CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER"
+validate_launcher_word "$claude_launcher" "CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER"
+
+cleanup_failed_workspace() {
+  local status=$?
+  if [[ "$status" -ne 0 && "$launch_ok" -ne 1 && -n "${workspace_ref:-}" && "$keep_failed_workspace" != "1" && "$keep_failed_workspace" != "true" ]]; then
+    "$cmux_bin" workspace close "$workspace_ref" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_failed_workspace EXIT
+
+if [[ ! -x "$cmux_bin" ]]; then
+  echo "cmux CLI not executable: $cmux_bin" >&2
+  exit 1
+fi
+
+handle_existing_workspace_state() {
+  local existing_workspace_ref
+  local workspace_lookup_status=0
+  local runtime_status=0
+  local project_session_active=0
+  if session_in_use "$project"; then
+    project_session_active=1
+  fi
+
+  existing_workspace_ref="$(workspace_ref_for_title "$project")" || workspace_lookup_status=$?
+  case "$workspace_lookup_status" in
+    0)
+      ;;
+    1)
+      existing_workspace_ref=""
+      ;;
+    *)
+      echo "Could not query cmux workspaces while checking $project. Refusing to launch until cmux state can be inspected." >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ "$project_session_active" -eq 1 && -n "$existing_workspace_ref" ]]; then
+    runtime_status=0
+    workspace_has_live_runtime "$existing_workspace_ref" || runtime_status=$?
+    case "$runtime_status" in
+      0)
+        ;;
+      1)
+        echo "AMQ session $project is active and cmux workspace $existing_workspace_ref exists, but it has no live terminal runtime. Refusing to spawn a parallel room." >&2
+        exit 1
+        ;;
+      *)
+        echo "AMQ session $project is active and cmux workspace $existing_workspace_ref exists, but its terminal runtime could not be inspected. Refusing to spawn a parallel room." >&2
+        exit 1
+        ;;
+    esac
+    if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+      printf 'cmux workspace select %q\n' "$existing_workspace_ref"
+      printf 'would reattach %q in %q using AMQ session %q\n' "$project" "$existing_workspace_ref" "$project"
+      exit 0
+    fi
+    if ! select_existing_workspace "$existing_workspace_ref"; then
+      echo "Could not select existing cmux workspace $existing_workspace_ref for $project" >&2
+      exit 1
+    fi
+    launch_ok=1
+    printf 'Reattached %s in %s using AMQ session %s\n' "$project" "$existing_workspace_ref" "$project"
+    exit 0
+  fi
+
+  if [[ "$project_session_active" -eq 1 ]]; then
+    echo "AMQ session $project is already active, but no cmux workspace titled $project was found. Refusing to spawn a parallel room." >&2
+    exit 1
+  fi
+
+  if [[ -n "$existing_workspace_ref" ]]; then
+    if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+      printf 'cmux workspace select %q\n' "$existing_workspace_ref"
+    else
+      select_existing_workspace "$existing_workspace_ref" >/dev/null 2>&1 || true
+    fi
+    echo "cmux workspace $existing_workspace_ref is titled $project, but AMQ session $project is not active. Refusing to create a duplicate workspace title." >&2
+    exit 1
+  fi
+}
+
+allocate_amq_session() {
+  local candidate="$project"
+  local n=2
+  while session_in_use "$candidate"; do
+    candidate="$project-$n"
+    n=$((n + 1))
+    if (( n > 1000 )); then
+      echo "Could not allocate an unused AMQ session for $project after 999 suffixes" >&2
+      return 1
+    fi
+  done
+  printf '%s\n' "$candidate"
+}
+
+if ! amq_base_root="$(resolve_amq_base_root)" || [[ -z "$amq_base_root" ]]; then
+  echo "Could not resolve AMQ base root for session allocation." >&2
+  exit 1
+fi
+if ! amq_who_state="$(amq_who_json "$amq_base_root")"; then
+  echo "Could not inspect AMQ sessions. Refusing to guess an unused session." >&2
+  exit 1
+fi
+handle_existing_workspace_state
+amq_session="$(allocate_amq_session)"
+
+layout=$(
+  /usr/bin/python3 - "$project" "$amq_session" "$workspace_root" "$codex_launcher" "$claude_launcher" <<'PY'
+import json
+import shlex
+import sys
+
+project, amq_session, workspace_root, codex_launcher, claude_launcher = sys.argv[1:6]
+# coopcodex/coopcc are zsh functions in ~/.zshrc, so load them through zsh -ic.
+codex_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(shlex.quote(codex_launcher) + ' ' + shlex.quote(amq_session))}"
+claude_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(shlex.quote(claude_launcher) + ' ' + shlex.quote(amq_session))}"
+layout = {
+    "direction": "horizontal",
+    "split": 0.5,
+    "children": [
+        {"pane": {"surfaces": [{"type": "terminal", "name": "Codex", "command": codex_command, "focus": True}]}},
+        {"pane": {"surfaces": [{"type": "terminal", "name": "Claude", "command": claude_command}]}},
+    ],
+}
+print(json.dumps(layout, separators=(",", ":")))
+PY
+)
+
+if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+  printf 'cmux workspace create --name %q --description %q --layout %q --focus true\n' \
+    "$amq_session" "Project launcher: $project (AMQ session: $amq_session)" "$layout"
+  printf 'allocated AMQ session: %q\n' "$amq_session"
+  printf 'post-boot Codex send: %q + sleep %q + send-key enter, retry up to %q\n' "\$start $project" "$enter_delay_seconds" "$enter_retries"
+  printf 'post-boot Claude send: %q + sleep %q + send-key enter, retry up to %q\n' "/start $project" "$enter_delay_seconds" "$enter_retries"
+  exit 0
+fi
+
+created=$("$cmux_bin" workspace create \
+  --name "$amq_session" \
+  --description "Project launcher: $project (AMQ session: $amq_session)" \
+  --layout "$layout" \
+  --focus true)
+
+workspace_ref="${created#OK }"
+if [[ -z "$workspace_ref" || "$workspace_ref" == "$created" ]]; then
+  echo "Unexpected cmux workspace create output: $created" >&2
+  exit 1
+fi
+
+# NOTE: bash 3.2 (the system /bin/bash a GUI-launched .app resolves via PATH) has no
+# `mapfile`/`readarray`, so these use the portable current-shell read loop. The
+# `|| [[ -n "$row" ]]` keeps a final newline-less line, matching `mapfile -t`.
+panes=()
+while IFS= read -r row || [[ -n "$row" ]]; do
+  panes+=("$row")
+done < <("$cmux_bin" list-panes --workspace "$workspace_ref" | extract_cmux_refs pane | head -n 2)
+surface_rows=()
+if [[ "${#panes[@]}" -gt 0 ]]; then
+  for pane in "${panes[@]}"; do
+    while IFS= read -r row; do
+      [[ -n "$row" ]] && surface_rows+=("$row")
+    done < <("$cmux_bin" list-pane-surfaces --workspace "$workspace_ref" --pane "$pane")
+  done
+else
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    surface_rows+=("$row")
+  done < <("$cmux_bin" list-pane-surfaces --workspace "$workspace_ref")
+fi
+
+codex_surfaces=()
+while IFS= read -r row || [[ -n "$row" ]]; do
+  codex_surfaces+=("$row")
+done < <(printf '%s\n' "${surface_rows[@]}" | surface_refs_for_name "Codex")
+claude_surfaces=()
+while IFS= read -r row || [[ -n "$row" ]]; do
+  claude_surfaces+=("$row")
+done < <(printf '%s\n' "${surface_rows[@]}" | surface_refs_for_name "Claude")
+
+if [[ "${#codex_surfaces[@]}" -ne 1 || "${#claude_surfaces[@]}" -ne 1 ]]; then
+  echo "Could not resolve Codex and Claude surfaces by name in $workspace_ref" >&2
+  printf 'Surface rows:\n' >&2
+  printf '%s\n' "${surface_rows[@]}" >&2
+  "$cmux_bin" list-panes --workspace "$workspace_ref" >&2 || true
+  "$cmux_bin" list-pane-surfaces --workspace "$workspace_ref" >&2 || true
+  exit 1
+fi
+
+codex_surface="${codex_surfaces[0]}"
+claude_surface="${claude_surfaces[0]}"
+
+agent_readiness_error() {
+  local codex_debug
+  local claude_debug
+  codex_debug="$(surface_debug_block "$codex_surface")"
+  claude_debug="$(surface_debug_block "$claude_surface")"
+  cat >&2 <<ERR
+cmux created $workspace_ref, but the Codex/Claude tabs did not become agent sessions.
+Refusing to send \$start or /start into plain shell terminals.
+
+AMQ session: $amq_session
+Codex surface: $codex_surface, expected screen regex: $codex_ready_regex
+Claude surface: $claude_surface, expected screen regex: $claude_ready_regex
+
+This matches the failure mode where cmux opens zsh tabs named Codex/Claude and /start
+is executed by zsh. Because this launcher uses coopcodex/coopcc, another common
+cause is AMQ --require-wake contention or a stale wake lock: the pane can fall
+back to a live shell without ever showing the agent banner. Retry after the wake
+lock clears, or inspect/clear AMQ wake state if this repeats.
+Close stale cmux workspaces or restart cmux, then try again.
+Set CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE=1 to keep the failed workspace.
+
+Codex debug:
+$codex_debug
+
+Claude debug:
+$claude_debug
+ERR
+}
+
+ensure_surface_runtime() {
+  local surface="$1"
+  if surface_has_live_runtime "$surface"; then
+    return 0
+  fi
+  promote_surface_once "$surface"
+  wait_for_surface_runtime "$surface"
+}
+
+if ! ensure_surface_runtime "$codex_surface"; then
+  agent_readiness_error
+  exit 1
+fi
+if ! ensure_surface_runtime "$claude_surface"; then
+  agent_readiness_error
+  exit 1
+fi
+
+if ! wait_for_surface_text "$codex_surface" "$codex_ready_regex"; then
+  sleep "$wait_seconds"
+  if ! wait_for_surface_text "$codex_surface" "$codex_ready_regex"; then
+    agent_readiness_error
+    exit 1
+  fi
+fi
+if ! wait_for_surface_text "$claude_surface" "$claude_ready_regex"; then
+  sleep "$wait_seconds"
+  if ! wait_for_surface_text "$claude_surface" "$claude_ready_regex"; then
+    agent_readiness_error
+    exit 1
+  fi
+fi
+
+if ! submit_prompt "$codex_surface" "\$start $project" codex; then
+  launch_ok=1
+  echo "Launched $project in $workspace_ref using AMQ session $amq_session, but could not confirm Codex submitted \$start." >&2
+  exit 1
+fi
+if ! submit_prompt "$claude_surface" "/start $project" claude; then
+  launch_ok=1
+  echo "Launched $project in $workspace_ref using AMQ session $amq_session, but could not confirm Claude submitted /start." >&2
+  exit 1
+fi
+
+launch_ok=1
+echo "Launched $project in $workspace_ref using AMQ session $amq_session"

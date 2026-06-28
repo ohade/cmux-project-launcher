@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+bundle_path="${CMUX_PROJECT_LAUNCHER_APP_BUNDLE:-$HOME/Applications/CmuxProjectLauncher.app}"
+executable_name="cmux-project-launcher"
+icon_name="AppIcon"
+icon_path="$repo_root/Resources/$icon_name.icns"
+
+cd "$repo_root"
+swift build
+
+if [[ ! -f "$icon_path" ]]; then
+  "$repo_root/bin/generate-app-icon" >/dev/null
+fi
+
+mkdir -p "$bundle_path/Contents/MacOS"
+mkdir -p "$bundle_path/Contents/Resources"
+mkdir -p "$bundle_path/Contents/Resources/bin"
+cp ".build/debug/$executable_name" "$bundle_path/Contents/MacOS/$executable_name"
+chmod +x "$bundle_path/Contents/MacOS/$executable_name"
+cp "$icon_path" "$bundle_path/Contents/Resources/$icon_name.icns"
+cp "$repo_root/bin/cmux-project-launch" "$bundle_path/Contents/Resources/bin/cmux-project-launch"
+cp "$repo_root/bin/cmux-project-create" "$bundle_path/Contents/Resources/bin/cmux-project-create"
+cp -R "$repo_root/bin/lib" "$bundle_path/Contents/Resources/bin/lib"
+chmod +x "$bundle_path/Contents/Resources/bin/cmux-project-launch" "$bundle_path/Contents/Resources/bin/cmux-project-create"
+
+cat > "$bundle_path/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>cmux-project-launcher</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.ohad.cmux-project-launcher</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>CmuxProjectLauncher</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LSUIElement</key>
+  <false/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
+PLIST
+
+touch "$bundle_path"
+echo "$bundle_path"
