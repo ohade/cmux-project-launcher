@@ -29,6 +29,7 @@ Environment:
                                   keep a failed cmux workspace for debugging
   CMUX_PROJECT_LAUNCHER_AMQ_ROOT  AMQ base root for session allocation
   CMUX_PROJECT_LAUNCHER_AMQ       AMQ CLI path for session allocation
+  CMUX_PROJECT_LAUNCHER_KEEPALIVE amq-keepalive path for safe stale-wake retirement
   CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS
                                   colon-separated AMQ paths or dirs for GUI PATH fallback
   CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT
@@ -55,6 +56,7 @@ fi
 
 cmux_bin="${CMUX_PROJECT_LAUNCHER_CMUX:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
 amq_bin="${CMUX_PROJECT_LAUNCHER_AMQ:-amq}"
+keepalive_bin="${CMUX_PROJECT_LAUNCHER_KEEPALIVE:-$HOME/bin/amq-keepalive}"
 open_bin="${CMUX_PROJECT_LAUNCHER_OPEN:-/usr/bin/open}"
 workspace_root="${CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT:-$HOME/git}"
 codex_launcher="${CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER:-coopcodex}"
@@ -72,6 +74,7 @@ keep_failed_workspace="${CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE:-0}"
 dry_run="${CMUX_PROJECT_LAUNCHER_DRY_RUN:-0}"
 workspace_ref=""
 launch_ok=0
+reuse_project_session=0
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/lib/cmux-project-common.sh
@@ -79,6 +82,7 @@ source "$script_dir/lib/cmux-project-common.sh"
 workspace_root="$(expand_path "$workspace_root")"
 validate_launcher_word "$codex_launcher" "CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER"
 validate_launcher_word "$claude_launcher" "CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER"
+keepalive_bin="$(expand_path "$keepalive_bin")"
 
 cleanup_failed_workspace() {
   local status=$?
@@ -145,7 +149,12 @@ handle_existing_workspace_state() {
   fi
 
   if [[ "$project_session_active" -eq 1 ]]; then
-    echo "AMQ session $project is already active, but no cmux workspace titled $project was found. Allocating a separate AMQ session instead." >&2
+    if retire_missing_workspace_session; then
+      reuse_project_session=1
+      echo "AMQ session $project had no cmux workspace. Retired its detached wakes and will reuse the original mailbox." >&2
+    else
+      echo "AMQ session $project is already active, but no cmux workspace titled $project was found. Could not safely retire it. Allocating a separate AMQ session instead." >&2
+    fi
   fi
 
   if [[ -n "$existing_workspace_ref" ]]; then
@@ -159,7 +168,37 @@ handle_existing_workspace_state() {
   fi
 }
 
+retire_missing_workspace_session() {
+  local session_root="$amq_base_root/$project"
+  local retire_output
+  if [[ ! -x "$keepalive_bin" ]]; then
+    echo "Safe AMQ retirement helper is unavailable or not executable: $keepalive_bin" >&2
+    return 1
+  fi
+  if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+    printf 'would retire detached AMQ wakes: %q retire-session --root %q --agents codex,claude --adapter cmux --amq %q --self %q\n' \
+      "$keepalive_bin" "$session_root" "$amq_bin" "$keepalive_bin"
+    return 0
+  fi
+  if retire_output="$(
+    "$keepalive_bin" retire-session \
+      --root "$session_root" \
+      --agents codex,claude \
+      --adapter cmux \
+      --amq "$amq_bin" \
+      --self "$keepalive_bin" 2>&1
+  )"; then
+    return 0
+  fi
+  echo "Safe AMQ retirement refused for $project: $retire_output" >&2
+  return 1
+}
+
 allocate_amq_session() {
+  if [[ "$reuse_project_session" -eq 1 ]]; then
+    printf '%s\n' "$project"
+    return 0
+  fi
   local candidate="$project"
   local n=2
   while session_in_use "$candidate"; do

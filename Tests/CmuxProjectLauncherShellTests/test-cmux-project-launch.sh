@@ -11,6 +11,7 @@ tmp_dir="$(mktemp -d)"
 fake_cmux="$tmp_dir/cmux"
 fake_amq="$tmp_dir/amq"
 fake_open="$tmp_dir/open"
+fake_keepalive="$tmp_dir/amq-keepalive"
 fake_amq_root="$tmp_dir/amq-root"
 send_log="$tmp_dir/send.log"
 key_log="$tmp_dir/key.log"
@@ -18,6 +19,7 @@ create_log="$tmp_dir/create.log"
 select_log="$tmp_dir/select.log"
 open_log="$tmp_dir/open.log"
 close_log="$tmp_dir/close.log"
+keepalive_log="$tmp_dir/keepalive.log"
 stdout_log="$tmp_dir/stdout.log"
 background_pids=()
 mkdir -p "$fake_amq_root"
@@ -313,6 +315,21 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${CMUX_FAKE_OPEN_LOG:?}"
 SH
 chmod +x "$fake_open"
+
+cat >"$fake_keepalive" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >>"${CMUX_FAKE_KEEPALIVE_LOG:?}"
+if [[ "${CMUX_FAKE_KEEPALIVE_MODE:-refuse}" != "success" ]]; then
+  printf 'target absence not proven\n' >&2
+  exit 1
+fi
+[[ "${1:-}" == "retire-session" ]]
+printf '{"root":"%s","adapter":"cmux","entries":[]}\n' "${CMUX_PROJECT_LAUNCHER_AMQ_ROOT:?}"
+SH
+chmod +x "$fake_keepalive"
+export CMUX_PROJECT_LAUNCHER_KEEPALIVE="$fake_keepalive"
+export CMUX_FAKE_KEEPALIVE_LOG="$keepalive_log"
 
 CMUX_FAKE_SEND_LOG="$send_log" \
 CMUX_FAKE_KEY_LOG="$key_log" \
@@ -663,6 +680,44 @@ grep -Fq 'not active' "$tmp_dir/stderr.log"
 : >"$select_log"
 : >"$open_log"
 : >"$close_log"
+: >"$keepalive_log"
+CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
+  CMUX_FAKE_KEEPALIVE_MODE=success \
+  CMUX_FAKE_EXPECT_SESSION=demo-project \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+grep -Fq 'Retired its detached wakes and will reuse the original mailbox' "$tmp_dir/stderr.log"
+grep -Fxq 'retire-session' "$keepalive_log"
+grep -Fq "$fake_amq_root/demo-project" "$keepalive_log"
+grep -Fq 'codex,claude' "$keepalive_log"
+grep -Fq "$fake_amq" "$keepalive_log"
+grep -Fq 'demo-project' "$create_log"
+grep -Fq 'Launched demo-project in workspace:10 using AMQ session demo-project' "$stdout_log"
+grep -Fq $'surface:26\t$start demo-project' "$send_log"
+grep -Fq $'surface:27\t/start demo-project' "$send_log"
+[[ ! -s "$select_log" ]]
+[[ ! -s "$open_log" ]]
+[[ ! -s "$close_log" ]]
+
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+: >"$keepalive_log"
 CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
   CMUX_FAKE_EXPECT_SESSION=demo-project-3 \
   CMUX_FAKE_SEND_LOG="$send_log" \
@@ -680,6 +735,8 @@ CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
     $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
 
 grep -Fq 'Allocating a separate AMQ session instead' "$tmp_dir/stderr.log"
+grep -Fq 'Safe AMQ retirement refused' "$tmp_dir/stderr.log"
+grep -Fxq 'retire-session' "$keepalive_log"
 grep -Fq $'surface:26\t$start demo-project' "$send_log"
 grep -Fq $'surface:27\t/start demo-project' "$send_log"
 grep -Fq $'surface:26\tenter' "$key_log"

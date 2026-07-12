@@ -76,6 +76,9 @@ Additional overrides:
 
 - `CMUX_PROJECT_LAUNCHER_AMQ`: AMQ executable path.
 - `CMUX_PROJECT_LAUNCHER_AMQ_ROOT`: AMQ base root.
+- `CMUX_PROJECT_LAUNCHER_KEEPALIVE`: `amq-keepalive` executable used for
+  identity-verified stale-wake retirement. Defaults to
+  `~/bin/amq-keepalive`.
 - `CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS`: colon-separated AMQ paths or dirs for
   GUI-launched environments.
 - `CMUX_PROJECT_LAUNCHER_START_PRECOMPUTE`: project-list helper.
@@ -130,7 +133,13 @@ bin/cmux-project-create --mode create \
   letters, digits, `.`, `_`, and `-`.
 - AMQ session allocation fails closed if AMQ state cannot be inspected.
 - Existing AMQ/cmux state is reconciled before launch; ambiguous states require
-  manual cleanup.
+  a separate suffixed room rather than destructive cleanup.
+- When the original AMQ room is active but its cmux workspace is gone, the
+  launcher first asks `amq-keepalive retire-session` to prove both registered
+  surfaces are missing and retire the exact owned wakes. On success it keeps
+  the mailbox and reuses the original room name; any missing helper, ambiguous
+  probe, target mismatch, or ownership race preserves the old room and falls
+  back to a suffixed session.
 - Prompts are sent only after live terminal runtime and agent readiness checks.
 - Prompt submission is confirmed through current visible cmux output; read
   failures are treated as failures, not success.
@@ -149,8 +158,9 @@ Tests/CmuxProjectLauncherShellTests/test-cmux-project-create.sh
 Tests/CmuxProjectLauncherShellTests/test-bash32-compat.sh
 ```
 
-The shell fixtures use fake cmux, AMQ, Claude, and progress helpers. They cover
-launch routing, reattach behavior, fail-closed AMQ/cmux state, prompt submission,
+The shell fixtures use fake cmux, AMQ, keepalive, Claude, and progress helpers.
+They cover launch routing, reattach behavior, exact-room stale-wake retirement,
+safe suffix fallback, fail-closed AMQ/cmux state, prompt submission,
 create-project gates, and Bash 3.2 compatibility.
 
 ## License
