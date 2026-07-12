@@ -87,6 +87,11 @@ Additional overrides:
 - `CMUX_PROJECT_LAUNCHER_ALLOW_FIXTURES=1`: allow mock data when loading fails.
 - `CMUX_PROJECT_LAUNCHER_COMMAND_TIMEOUT`: helper command timeout in seconds,
   capped at 3600.
+- `CMUX_PROJECT_LAUNCHER_LOG`: persistent diagnostic log path. Defaults to
+  `~/Library/Logs/CmuxProjectLauncher/launcher.log`.
+
+Every error displayed by the app is appended to the diagnostic log. The log is
+created with user-only permissions and rotates to `launcher.log.1` at 2 MiB.
 
 ## CLI Helpers
 

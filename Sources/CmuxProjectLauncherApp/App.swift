@@ -45,7 +45,13 @@ final class LauncherViewModel: ObservableObject {
     @Published var loadProgress: Double?
     @Published var loadStatusText: String?
     @Published var statusText = "Ready"
-    @Published var errorText: String?
+    @Published var errorText: String? {
+        didSet {
+            if let errorText {
+                LauncherDiagnostics.record(errorText)
+            }
+        }
+    }
     @Published var createDecisionPrompt: CreateDecisionPrompt?
     @Published var createDraft = ProjectCreationDraft()
     @Published var usesFixtureFallback = false

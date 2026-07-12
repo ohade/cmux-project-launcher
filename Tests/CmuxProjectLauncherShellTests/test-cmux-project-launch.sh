@@ -178,7 +178,7 @@ JSON
       case "$surface" in
         surface:26)
           printf 'OpenAI Codex\n'
-          printf 'gpt-5.5 xhigh fast - Ready\n'
+          printf 'gpt-5.6-sol xhigh fast - ~/git - Read\n'
           ;;
         surface:27)
           printf 'Welcome to Claude Code\n'

@@ -316,6 +316,23 @@ final class ProgressProjectStoreTests: XCTestCase {
         XCTAssertEqual(launchOutput, "Launched demo-project")
     }
 
+    func testLauncherDiagnosticsPersistsUserFacingErrors() throws {
+        let root = try temporaryDirectory()
+        let log = root.appendingPathComponent("launcher.log")
+        setenv("CMUX_PROJECT_LAUNCHER_LOG", log.path, 1)
+        addTeardownBlock {
+            unsetenv("CMUX_PROJECT_LAUNCHER_LOG")
+        }
+
+        LauncherDiagnostics.record("workspace close workspace:13 failed\nError: not_found")
+
+        let written = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(written.contains("workspace close workspace:13 failed"))
+        XCTAssertTrue(written.contains("Error: not_found"))
+        let attributes = try FileManager.default.attributesOfItem(atPath: log.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
     func testLauncherUsesCreateScriptForCreateProject() throws {
         let root = try temporaryDirectory()
         let script = root.appendingPathComponent("create.sh")

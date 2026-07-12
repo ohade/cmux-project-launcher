@@ -61,7 +61,7 @@ codex_launcher="${CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER:-coopcodex}"
 claude_launcher="${CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER:-coopcc}"
 wait_seconds="${CMUX_PROJECT_LAUNCHER_WAIT:-8}"
 poll_seconds="${CMUX_PROJECT_LAUNCHER_POLL:-45}"
-codex_ready_regex="${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
+codex_ready_regex="${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-OpenAI Codex|gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
 claude_ready_regex="${CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX:-Claude Code|Welcome to Claude|Opus [0-9]|Sonnet [0-9]|bypass permissions}"
 promote_wait_seconds="${CMUX_PROJECT_LAUNCHER_PROMOTE_WAIT:-5}"
 enter_delay_seconds="${CMUX_PROJECT_LAUNCHER_ENTER_DELAY:-0.5}"
@@ -270,23 +270,27 @@ codex_surface="${codex_surfaces[0]}"
 claude_surface="${claude_surfaces[0]}"
 
 agent_readiness_error() {
+  local reason="$1"
   local codex_debug
   local claude_debug
+  local codex_screen
+  local claude_screen
   codex_debug="$(surface_debug_block "$codex_surface")"
   claude_debug="$(surface_debug_block "$claude_surface")"
+  codex_screen="$(read_surface_text "$codex_surface" || true)"
+  claude_screen="$(read_surface_text "$claude_surface" || true)"
   cat >&2 <<ERR
-cmux created $workspace_ref, but the Codex/Claude tabs did not become agent sessions.
-Refusing to send \$start or /start into plain shell terminals.
+cmux created $workspace_ref, but the Codex/Claude tabs did not pass readiness checks.
+$reason
+Refusing to send \$start or /start until both agent sessions are confirmed.
 
 AMQ session: $amq_session
 Codex surface: $codex_surface, expected screen regex: $codex_ready_regex
 Claude surface: $claude_surface, expected screen regex: $claude_ready_regex
 
-This matches the failure mode where cmux opens zsh tabs named Codex/Claude and /start
-is executed by zsh. Because this launcher uses coopcodex/coopcc, another common
-cause is AMQ --require-wake contention or a stale wake lock: the pane can fall
-back to a live shell without ever showing the agent banner. Retry after the wake
-lock clears, or inspect/clear AMQ wake state if this repeats.
+If a screen dump below shows only zsh, inspect AMQ --require-wake state and the
+session's wake locks. A visible agent banner instead indicates a readiness-regex
+or startup-timing mismatch, not a failed wake registration.
 Close stale cmux workspaces or restart cmux, then try again.
 Set CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE=1 to keep the failed workspace.
 
@@ -295,6 +299,12 @@ $codex_debug
 
 Claude debug:
 $claude_debug
+
+Codex screen:
+$codex_screen
+
+Claude screen:
+$claude_screen
 ERR
 }
 
@@ -308,25 +318,25 @@ ensure_surface_runtime() {
 }
 
 if ! ensure_surface_runtime "$codex_surface"; then
-  agent_readiness_error
+  agent_readiness_error "Codex surface $codex_surface did not obtain a live terminal runtime."
   exit 1
 fi
 if ! ensure_surface_runtime "$claude_surface"; then
-  agent_readiness_error
+  agent_readiness_error "Claude surface $claude_surface did not obtain a live terminal runtime."
   exit 1
 fi
 
 if ! wait_for_surface_text "$codex_surface" "$codex_ready_regex"; then
   sleep "$wait_seconds"
   if ! wait_for_surface_text "$codex_surface" "$codex_ready_regex"; then
-    agent_readiness_error
+    agent_readiness_error "Codex surface $codex_surface did not show a recognized Codex banner."
     exit 1
   fi
 fi
 if ! wait_for_surface_text "$claude_surface" "$claude_ready_regex"; then
   sleep "$wait_seconds"
   if ! wait_for_surface_text "$claude_surface" "$claude_ready_regex"; then
-    agent_readiness_error
+    agent_readiness_error "Claude surface $claude_surface did not show a recognized Claude banner."
     exit 1
   fi
 fi

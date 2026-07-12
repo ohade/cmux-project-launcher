@@ -2,6 +2,59 @@ import Foundation
 
 private let commandOutputLimit = 64 * 1024
 
+public enum LauncherDiagnostics {
+    private static let writeLock = NSLock()
+    private static let maxLogBytes: UInt64 = 2 * 1024 * 1024
+
+    public static func logURL() -> URL {
+        if let override = ProcessInfo.processInfo.environment["CMUX_PROJECT_LAUNCHER_LOG"],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: NSString(string: override).expandingTildeInPath)
+        }
+        let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library", isDirectory: true)
+        return library
+            .appendingPathComponent("Logs/CmuxProjectLauncher", isDirectory: true)
+            .appendingPathComponent("launcher.log")
+    }
+
+    public static func record(_ message: String) {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        do {
+            let fileManager = FileManager.default
+            let url = logURL()
+            let directory = url.deletingLastPathComponent()
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+
+            if let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+               let size = attributes[.size] as? NSNumber,
+               size.uint64Value >= maxLogBytes {
+                let rotated = url.appendingPathExtension("1")
+                try? fileManager.removeItem(at: rotated)
+                try fileManager.moveItem(at: url, to: rotated)
+            }
+
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let data = Data("[\(timestamp)]\n\(trimmed)\n\n".utf8)
+            if !fileManager.fileExists(atPath: url.path) {
+                guard fileManager.createFile(atPath: url.path, contents: nil) else { return }
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            // Diagnostics must never replace the user-facing error that triggered them.
+        }
+    }
+}
+
 public enum CmuxLaunchPlanError: Error, LocalizedError, Equatable {
     case invalidLauncherCommand(String, String)
 
