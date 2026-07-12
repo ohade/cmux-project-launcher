@@ -470,6 +470,34 @@ final class ProgressProjectStoreTests: XCTestCase {
         XCTAssertTrue(written.contains("adhoc-zesty-kazoo-123"))
     }
 
+    func testCloseWorkspaceTreatsAlreadyGoneAsSuccess() throws {
+        let root = try temporaryDirectory()
+        let cmux = root.appendingPathComponent("cmux")
+        try """
+        #!/usr/bin/env bash
+        printf 'Error: not_found: Workspace not found\\n' >&2
+        exit 1
+        """.write(to: cmux, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cmux.path)
+
+        let launcher = CmuxLauncher(cmuxPath: cmux.path, scriptPath: "/tmp/launch", createScriptPath: "/tmp/create")
+        XCTAssertEqual(try launcher.closeWorkspace("workspace:404"), "")
+    }
+
+    func testCloseWorkspaceStillThrowsOtherFailures() throws {
+        let root = try temporaryDirectory()
+        let cmux = root.appendingPathComponent("cmux")
+        try """
+        #!/usr/bin/env bash
+        printf 'permission denied\\n' >&2
+        exit 1
+        """.write(to: cmux, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cmux.path)
+
+        let launcher = CmuxLauncher(cmuxPath: cmux.path, scriptPath: "/tmp/launch", createScriptPath: "/tmp/create")
+        XCTAssertThrowsError(try launcher.closeWorkspace("workspace:403"))
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("cmux-project-launcher-tests-\(UUID().uuidString)", isDirectory: true)

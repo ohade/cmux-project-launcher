@@ -21,8 +21,10 @@ open_log="$tmp_dir/open.log"
 close_log="$tmp_dir/close.log"
 keepalive_log="$tmp_dir/keepalive.log"
 stdout_log="$tmp_dir/stdout.log"
+diagnostics_log="$tmp_dir/launcher.log"
 background_pids=()
 mkdir -p "$fake_amq_root"
+export CMUX_PROJECT_LAUNCHER_LOG="$diagnostics_log"
 cleanup() {
   if [[ "${#background_pids[@]}" -gt 0 ]]; then
     kill "${background_pids[@]}" 2>/dev/null || true
@@ -383,6 +385,9 @@ grep -Fq 'demo-project' "$create_log"
 grep -Fq 'workspace:10' "$close_log"
 grep -Fq 'Refusing to send' "$tmp_dir/stderr.log"
 grep -Fq 'wake lock' "$tmp_dir/stderr.log"
+grep -Fq 'Refusing to send' "$diagnostics_log"
+grep -Fq 'wake lock' "$diagnostics_log"
+[[ "$(stat -f '%Lp' "$diagnostics_log")" == "600" ]]
 
 : >"$send_log"
 : >"$key_log"

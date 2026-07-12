@@ -39,6 +39,7 @@ Environment:
   CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER
                                   Claude shell function or executable (default: coopcc)
   CMUX_PROJECT_LAUNCHER_OPEN      open CLI path for app activation
+  CMUX_PROJECT_LAUNCHER_LOG       persistent diagnostics log path
   CMUX_PROJECT_LAUNCHER_DRY_RUN  print planned commands without launching
 USAGE
 }
@@ -72,6 +73,7 @@ submit_confirm_wait_seconds="${CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT:-4}"
 input_probe_lines="${CMUX_PROJECT_LAUNCHER_INPUT_LINES:-18}"
 keep_failed_workspace="${CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE:-0}"
 dry_run="${CMUX_PROJECT_LAUNCHER_DRY_RUN:-0}"
+diagnostics_log="${CMUX_PROJECT_LAUNCHER_LOG:-$HOME/Library/Logs/CmuxProjectLauncher/launcher.log}"
 workspace_ref=""
 launch_ok=0
 reuse_project_session=0
@@ -79,6 +81,22 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/lib/cmux-project-common.sh
 source "$script_dir/lib/cmux-project-common.sh"
+
+setup_diagnostics_log() {
+  local log_dir
+  log_dir="$(dirname "$diagnostics_log")"
+  mkdir -p "$log_dir" 2>/dev/null || return 0
+  if [[ -f "$diagnostics_log" ]] && [[ "$(wc -c <"$diagnostics_log" 2>/dev/null || printf '0')" -ge 2097152 ]]; then
+    mv -f "$diagnostics_log" "${diagnostics_log}.1" 2>/dev/null || true
+  fi
+  : >>"$diagnostics_log" 2>/dev/null || return 0
+  chmod 600 "$diagnostics_log" 2>/dev/null || return 0
+  printf '[%s] cmux-project-launch %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$project" >>"$diagnostics_log"
+  exec 3>&2
+  exec 2> >(tee -a "$diagnostics_log" >&3)
+}
+
+setup_diagnostics_log
 workspace_root="$(expand_path "$workspace_root")"
 validate_launcher_word "$codex_launcher" "CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER"
 validate_launcher_word "$claude_launcher" "CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER"

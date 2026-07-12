@@ -348,7 +348,20 @@ public struct CmuxLauncher: Sendable {
 
     @discardableResult
     public func closeWorkspace(_ workspaceRef: String) throws -> String {
-        try run(arguments: ["workspace", "close", workspaceRef])
+        do {
+            return try run(arguments: ["workspace", "close", workspaceRef])
+        } catch CmuxLauncherError.commandFailed(_, _, let output, let error) {
+            let diagnostic = "\(output)\n\(error)".lowercased()
+            if diagnostic.contains("not_found"), diagnostic.contains("workspace not found") {
+                return ""
+            }
+            throw CmuxLauncherError.commandFailed(
+                executablePath: cmuxPath,
+                arguments: ["workspace", "close", workspaceRef],
+                output: output,
+                error: error
+            )
+        }
     }
 
     @discardableResult
@@ -437,6 +450,7 @@ public struct CmuxLauncher: Sendable {
             "TMPDIR",
             "USER",
             "__CFBundleIdentifier",
+            "CMUX_PROJECT_LAUNCHER_LOG",
         ]
         var result: [String: String] = [:]
         for key in allowedKeys {
