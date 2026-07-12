@@ -145,8 +145,7 @@ handle_existing_workspace_state() {
   fi
 
   if [[ "$project_session_active" -eq 1 ]]; then
-    echo "AMQ session $project is already active, but no cmux workspace titled $project was found. Refusing to spawn a parallel room." >&2
-    exit 1
+    echo "AMQ session $project is already active, but no cmux workspace titled $project was found. Allocating a separate AMQ session instead." >&2
   fi
 
   if [[ -n "$existing_workspace_ref" ]]; then

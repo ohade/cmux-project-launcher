@@ -1,0 +1,1257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>cmux Project Launcher - Operator Board mock</title>
+<!--
+  Codex independent UI mock for a cmux Project Launcher operator board.
+  Self-contained: embedded CSS, demo data, and vanilla JS only.
+  Demo-safe sample data only: DEMO-* tickets and /Users/example paths.
+-->
+<style>
+  :root {
+    --bg: #d6d7dc;
+    --window: #fbfbfd;
+    --bar: #f1f1f4;
+    --pane: #ffffff;
+    --pane-alt: #f7f7f9;
+    --line: #dedee3;
+    --line-strong: #c8c8cf;
+    --text: #1d1d1f;
+    --muted: #666971;
+    --faint: #8b8e97;
+    --blue: #0a84ff;
+    --blue-soft: rgba(10, 132, 255, 0.11);
+    --green: #2e9f58;
+    --green-soft: rgba(46, 159, 88, 0.12);
+    --amber: #bf7500;
+    --amber-soft: rgba(191, 117, 0, 0.13);
+    --red: #cf3b30;
+    --red-soft: rgba(207, 59, 48, 0.12);
+    --violet: #7a5cff;
+    --violet-soft: rgba(122, 92, 255, 0.12);
+    --gray-soft: rgba(115, 118, 128, 0.12);
+    --radius: 8px;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+    --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151518;
+      --window: #202024;
+      --bar: #29292e;
+      --pane: #222226;
+      --pane-alt: #2a2a2f;
+      --line: #3a3a40;
+      --line-strong: #484850;
+      --text: #f3f3f6;
+      --muted: #aaaab3;
+      --faint: #7c7d86;
+      --blue: #45a2ff;
+      --blue-soft: rgba(69, 162, 255, 0.16);
+      --green: #59c878;
+      --green-soft: rgba(89, 200, 120, 0.16);
+      --amber: #f0a83a;
+      --amber-soft: rgba(240, 168, 58, 0.16);
+      --red: #ff7065;
+      --red-soft: rgba(255, 112, 101, 0.16);
+      --violet: #9b88ff;
+      --violet-soft: rgba(155, 136, 255, 0.17);
+      --gray-soft: rgba(170, 172, 182, 0.12);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { min-height: 100%; }
+  body {
+    margin: 0;
+    padding: 24px;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    font-family: var(--font);
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button, select { font: inherit; }
+  button { cursor: pointer; }
+  code, pre { font-family: var(--mono); }
+
+  .window {
+    width: min(1240px, 100%);
+    height: min(780px, calc(100vh - 48px));
+    min-height: 660px;
+    background: var(--window);
+    border: 0.5px solid rgba(0, 0, 0, 0.2);
+    border-radius: 14px;
+    box-shadow: 0 28px 70px rgba(0, 0, 0, 0.28), 0 2px 8px rgba(0, 0, 0, 0.16);
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: 236px minmax(420px, 1fr) 382px;
+    grid-template-rows: 44px 52px 1fr;
+  }
+
+  .titlebar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 14px;
+    background: linear-gradient(#f8f8fa, var(--bar));
+    border-bottom: 0.5px solid var(--line-strong);
+  }
+  @media (prefers-color-scheme: dark) {
+    .titlebar { background: linear-gradient(#303036, var(--bar)); }
+  }
+
+  .traffic { display: flex; gap: 8px; }
+  .traffic span { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .traffic .close { background: #ff5f57; }
+  .traffic .min { background: #febc2e; }
+  .traffic .zoom { background: #28c840; }
+
+  .app-title { font-size: 13px; font-weight: 650; color: var(--muted); }
+  .title-spacer { flex: 1; }
+  .search {
+    width: 220px;
+    height: 28px;
+    border: 0.5px solid var(--line);
+    background: rgba(255, 255, 255, 0.52);
+    border-radius: 7px;
+    color: var(--faint);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .search { background: rgba(255, 255, 255, 0.07); }
+  }
+
+  .topbar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--pane);
+    border-bottom: 0.5px solid var(--line);
+  }
+
+  .segmented {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border: 0.5px solid var(--line);
+    border-radius: 8px;
+    background: var(--pane-alt);
+  }
+  .segment {
+    border: 0;
+    background: transparent;
+    border-radius: 6px;
+    min-height: 28px;
+    padding: 0 9px;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .segment.active {
+    color: var(--text);
+    background: var(--pane);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+  .topbar .divider { width: 1px; height: 24px; background: var(--line); }
+  .sort-wrap {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  select {
+    height: 30px;
+    min-width: 132px;
+    border-radius: 7px;
+    border: 0.5px solid var(--line);
+    background: var(--pane);
+    color: var(--text);
+    padding: 0 8px;
+  }
+
+  .rail {
+    background: var(--bar);
+    border-right: 0.5px solid var(--line-strong);
+    overflow: auto;
+    padding: 14px 12px;
+  }
+  .rail-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.45px;
+    font-weight: 700;
+    color: var(--faint);
+    margin: 0 0 8px;
+  }
+  .metric {
+    min-height: 58px;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 9px;
+    border-top: 0.5px solid var(--line);
+    padding: 9px 2px;
+  }
+  .metric:first-of-type { border-top: 0; }
+  .metric-number {
+    width: 38px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border-radius: 7px;
+    background: var(--pane);
+    border: 0.5px solid var(--line);
+    font-weight: 700;
+    font-size: 14px;
+  }
+  .metric-label { font-size: 12px; color: var(--muted); line-height: 1.35; }
+  .health-key {
+    display: grid;
+    gap: 7px;
+    margin-top: 16px;
+  }
+  .key-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 26px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .key-count { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  .board {
+    background: var(--pane);
+    overflow: auto;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    min-width: 0;
+  }
+  .board-head,
+  .project-row {
+    display: grid;
+    grid-template-columns: minmax(170px, 1.2fr) minmax(168px, 1fr) 102px 112px;
+    gap: 10px;
+    align-items: center;
+  }
+  .board-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    min-height: 34px;
+    padding: 0 16px;
+    background: var(--pane);
+    border-bottom: 0.5px solid var(--line);
+    color: var(--faint);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-weight: 700;
+  }
+  .board-list { min-width: 0; }
+  .project-row {
+    width: 100%;
+    border: 0;
+    border-bottom: 0.5px solid var(--line);
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    padding: 12px 16px;
+    min-height: 82px;
+  }
+  .project-row:hover { background: rgba(10, 132, 255, 0.045); }
+  .project-row.selected {
+    background: var(--blue-soft);
+    box-shadow: inset 3px 0 0 var(--blue);
+  }
+  .project-title {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+  }
+  .name-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .name {
+    font-weight: 700;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .scope {
+    color: var(--faint);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .summary-line {
+    color: var(--muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    max-width: 100%;
+    border-radius: 999px;
+    padding: 2px 7px;
+    border: 0.5px solid var(--line);
+    background: var(--gray-soft);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 650;
+    white-space: nowrap;
+  }
+  .chip.ok { color: var(--green); background: var(--green-soft); border-color: rgba(46, 159, 88, 0.22); }
+  .chip.run { color: var(--blue); background: var(--blue-soft); border-color: rgba(10, 132, 255, 0.25); }
+  .chip.warn { color: var(--amber); background: var(--amber-soft); border-color: rgba(191, 117, 0, 0.26); }
+  .chip.bad { color: var(--red); background: var(--red-soft); border-color: rgba(207, 59, 48, 0.24); }
+  .chip.note { color: var(--violet); background: var(--violet-soft); border-color: rgba(122, 92, 255, 0.24); }
+  .chip.gray { color: var(--muted); background: var(--gray-soft); }
+
+  .signals-strip {
+    display: grid;
+    grid-template-columns: repeat(7, 18px);
+    gap: 5px;
+    align-items: center;
+  }
+  .signal-dot {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    display: grid;
+    place-items: center;
+    border: 0.5px solid var(--line);
+    color: var(--faint);
+    font-size: 10px;
+    font-weight: 750;
+  }
+  .signal-dot.on { color: var(--green); background: var(--green-soft); border-color: rgba(46, 159, 88, 0.24); }
+  .signal-dot.warn { color: var(--amber); background: var(--amber-soft); border-color: rgba(191, 117, 0, 0.26); }
+  .signal-dot.bad { color: var(--red); background: var(--red-soft); border-color: rgba(207, 59, 48, 0.26); }
+  .last-cell,
+  .action-cell {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+  .action-cell { color: var(--text); font-weight: 650; }
+
+  .detail {
+    background: var(--pane-alt);
+    border-left: 0.5px solid var(--line-strong);
+    overflow: auto;
+    padding: 16px;
+    min-width: 0;
+  }
+  .detail-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 14px;
+    border-bottom: 0.5px solid var(--line);
+  }
+  .detail-name {
+    margin: 0 0 4px;
+    font-size: 21px;
+    line-height: 1.14;
+    letter-spacing: 0;
+  }
+  .detail-sub { color: var(--muted); font-size: 12px; line-height: 1.35; }
+  .section {
+    padding: 14px 0;
+    border-bottom: 0.5px solid var(--line);
+  }
+  .section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0 0 9px;
+    color: var(--faint);
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 0.45px;
+    text-transform: uppercase;
+  }
+  .summary-grid {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: 8px 10px;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  .summary-grid dt { color: var(--faint); }
+  .summary-grid dd { margin: 0; min-width: 0; }
+  .summary-grid code {
+    font-size: 12px;
+    background: var(--gray-soft);
+    border: 0.5px solid var(--line);
+    border-radius: 5px;
+    padding: 1px 5px;
+  }
+
+  .preview {
+    border: 0.5px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--pane);
+    overflow: hidden;
+  }
+  .preview-line {
+    display: flex;
+    gap: 9px;
+    align-items: flex-start;
+    padding: 10px 11px;
+    border-top: 0.5px solid var(--line);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+  .preview-line:first-child { border-top: 0; }
+  .preview-label {
+    flex: 0 0 64px;
+    color: var(--faint);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.35px;
+    font-weight: 750;
+  }
+  .preview-text { min-width: 0; }
+  .preview.blocked { border-color: rgba(207, 59, 48, 0.34); }
+  .preview.ready { border-color: rgba(46, 159, 88, 0.28); }
+  .preview.running { border-color: rgba(10, 132, 255, 0.3); }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .btn {
+    min-height: 30px;
+    border-radius: 7px;
+    border: 0.5px solid var(--line-strong);
+    background: var(--pane);
+    color: var(--text);
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 650;
+  }
+  .btn.primary { background: var(--blue); color: #fff; border-color: rgba(0, 0, 0, 0); }
+  .btn.warn { color: var(--amber); background: var(--amber-soft); border-color: rgba(191, 117, 0, 0.25); }
+  .btn.bad { color: var(--red); background: var(--red-soft); border-color: rgba(207, 59, 48, 0.24); }
+
+  .signals-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .signal-card {
+    min-height: 60px;
+    border: 0.5px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--pane);
+    padding: 9px;
+    display: grid;
+    gap: 4px;
+  }
+  .signal-card strong { font-size: 12px; }
+  .signal-card span { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .signal-card.good { border-color: rgba(46, 159, 88, 0.22); }
+  .signal-card.warn { border-color: rgba(191, 117, 0, 0.26); }
+  .signal-card.bad { border-color: rgba(207, 59, 48, 0.24); }
+
+  .needs-list {
+    display: grid;
+    gap: 8px;
+  }
+  .need {
+    border: 0.5px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--pane);
+    padding: 9px 10px;
+    display: grid;
+    gap: 3px;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  .need strong { font-size: 12px; }
+  .need span { color: var(--muted); }
+
+  .command-list {
+    display: grid;
+    gap: 7px;
+  }
+  .command {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    align-items: center;
+    border: 0.5px solid var(--line);
+    border-radius: 7px;
+    background: var(--pane);
+    padding: 7px 8px;
+  }
+  .command code {
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .copy {
+    height: 24px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--gray-soft);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 0 8px;
+  }
+
+  details {
+    border: 0.5px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--pane);
+    overflow: hidden;
+  }
+  summary {
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 10px;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .raw {
+    margin: 0;
+    padding: 12px;
+    border-top: 0.5px solid var(--line);
+    background: rgba(0, 0, 0, 0.025);
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow: auto;
+  }
+  @media (prefers-color-scheme: dark) {
+    .raw { background: rgba(0, 0, 0, 0.24); }
+  }
+
+  .empty {
+    padding: 38px 20px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  @media (max-width: 980px) {
+    body { padding: 0; place-items: stretch; }
+    .window {
+      width: 100%;
+      height: 100vh;
+      min-height: 0;
+      border-radius: 0;
+      grid-template-columns: 1fr;
+      grid-template-rows: 44px auto auto 1fr;
+    }
+    .topbar { grid-row: 2; overflow-x: auto; }
+    .rail {
+      grid-row: 3;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 8px;
+      border-right: 0;
+      border-bottom: 0.5px solid var(--line-strong);
+      padding: 8px;
+    }
+    .rail-title, .health-key { display: none; }
+    .metric { border: 0.5px solid var(--line); border-radius: var(--radius); padding: 7px; background: var(--pane); }
+    .board { grid-row: 4; }
+    .detail { display: none; }
+    .board-head, .project-row {
+      grid-template-columns: minmax(160px, 1fr) minmax(150px, 1fr) 96px;
+    }
+    .board-head > :nth-child(4),
+    .project-row > :nth-child(4) { display: none; }
+  }
+</style>
+</head>
+<body>
+  <main class="window" aria-label="cmux Project Launcher operator board mock">
+    <header class="titlebar">
+      <div class="traffic" aria-hidden="true"><span class="close"></span><span class="min"></span><span class="zoom"></span></div>
+      <div class="app-title">cmux Project Launcher</div>
+      <div class="title-spacer"></div>
+      <div class="search" aria-label="Search projects">
+        <span aria-hidden="true">/</span>
+        <span>Search projects</span>
+      </div>
+    </header>
+
+    <nav class="topbar" aria-label="Project board filters">
+      <div class="segmented" id="filters"></div>
+      <div class="divider" aria-hidden="true"></div>
+      <div class="segmented" id="statusFilters"></div>
+      <label class="sort-wrap" for="sortMode">
+        Order by
+        <select id="sortMode" aria-label="Order projects">
+          <option value="attention">Needs attention</option>
+          <option value="lastTouched">Last touched</option>
+          <option value="created">Created</option>
+          <option value="name">Name</option>
+        </select>
+      </label>
+    </nav>
+
+    <aside class="rail" aria-label="Board counts">
+      <h2 class="rail-title">Snapshot</h2>
+      <div id="metrics"></div>
+      <div class="health-key" id="healthKey"></div>
+    </aside>
+
+    <section class="board" aria-label="Projects">
+      <div class="board-head">
+        <span>Project</span>
+        <span>Computed state</span>
+        <span>Signals</span>
+        <span>Next valid action</span>
+      </div>
+      <div class="board-list" id="projectList"></div>
+    </section>
+
+    <aside class="detail" id="detail" aria-label="Project detail"></aside>
+  </main>
+
+<script>
+const projects = [
+  {
+    id: "search-quality",
+    name: "search-quality",
+    scope: "Production worktree",
+    path: "/Users/example/git/worktrees/search-quality",
+    ticket: "DEMO-214",
+    created: "2026-06-29",
+    touchedMinutes: 18,
+    lastTouched: "18m ago",
+    now: "Compare current ranking deltas against the reviewed fixture set.",
+    next: "Reattach the running workspace and finish the fixture pass.",
+    signals: {
+      progress: "progress__search-quality.md",
+      taskState: "search-quality-task-state.md",
+      amq: "search-quality",
+      cmux: "workspace:3",
+      runtime: "Codex + Claude panes live",
+      wake: "",
+      lastLaunch: "ok, 18m ago",
+      explicitNeed: "AMQ message addressed to Ohad"
+    },
+    raw: [
+      "# Project: search-quality",
+      "**Ticket**: DEMO-214",
+      "**Now**: Compare current ranking deltas against the reviewed fixture set.",
+      "**Next**: Reattach the running workspace and finish the fixture pass.",
+      "**Task State**: search-quality-task-state.md"
+    ].join("\n")
+  },
+  {
+    id: "report-refresh",
+    name: "report-refresh",
+    scope: "Production worktree",
+    path: "/Users/example/git/worktrees/report-refresh",
+    ticket: "DEMO-183",
+    created: "2026-06-27",
+    touchedMinutes: 74,
+    lastTouched: "1h ago",
+    now: "Launch failed after the AMQ session stayed alive without a cmux workspace.",
+    next: "Clean up the orphaned AMQ room, then retry from a fresh preview.",
+    signals: {
+      progress: "progress__report-refresh.md",
+      taskState: "report-refresh-task-state.md",
+      amq: "report-refresh",
+      cmux: "",
+      runtime: "",
+      wake: "",
+      lastLaunch: "failed, cmux workspace missing",
+      explicitNeed: ""
+    },
+    raw: [
+      "# Project: report-refresh",
+      "**Ticket**: DEMO-183",
+      "**Now**: Launch failed after the AMQ session stayed alive without a cmux workspace.",
+      "**Next**: Clean up the orphaned AMQ room, then retry from a fresh preview.",
+      "**Task State**: report-refresh-task-state.md"
+    ].join("\n")
+  },
+  {
+    id: "docs-indexer",
+    name: "docs-indexer",
+    scope: "Personal playground",
+    path: "/Users/example/git/playground/docs-indexer",
+    ticket: "DEMO-119",
+    created: "2026-06-23",
+    touchedMinutes: 190,
+    lastTouched: "3h ago",
+    now: "Progress file exists, but there is no linked task-state history.",
+    next: "Create the missing task-state file before handing this to another agent.",
+    signals: {
+      progress: "progress__docs-indexer.md",
+      taskState: "",
+      amq: "",
+      cmux: "",
+      runtime: "",
+      wake: "",
+      lastLaunch: "ok, 3d ago",
+      explicitNeed: "Progress metadata: needs-you"
+    },
+    raw: [
+      "# Project: docs-indexer",
+      "**Ticket**: DEMO-119",
+      "**Now**: Progress file exists, but there is no linked task-state history.",
+      "**Next**: Create the missing task-state file before handing this to another agent.",
+      "**Needs You**: progress metadata"
+    ].join("\n")
+  },
+  {
+    id: "pipeline-smoke",
+    name: "pipeline-smoke",
+    scope: "Production worktree",
+    path: "/Users/example/git/worktrees/pipeline-smoke",
+    ticket: "DEMO-168",
+    created: "2026-06-30",
+    touchedMinutes: 420,
+    lastTouched: "7h ago",
+    now: "Wake lock remains after a scheduled smoke run.",
+    next: "Inspect the wake target, then clear or resume it intentionally.",
+    signals: {
+      progress: "progress__pipeline-smoke.md",
+      taskState: "pipeline-smoke-task-state.md",
+      amq: "",
+      cmux: "",
+      runtime: "",
+      wake: "wake/pipeline-smoke.lock",
+      lastLaunch: "deferred, wake target active",
+      explicitNeed: "Task-state marker: needs-user"
+    },
+    raw: [
+      "# Project: pipeline-smoke",
+      "**Ticket**: DEMO-168",
+      "**Now**: Wake lock remains after a scheduled smoke run.",
+      "**Next**: Inspect the wake target, then clear or resume it intentionally.",
+      "**Task State**: pipeline-smoke-task-state.md"
+    ].join("\n")
+  },
+  {
+    id: "dashboard-create",
+    name: "dashboard-create",
+    scope: "Personal playground",
+    path: "/Users/example/git/playground/dashboard-create",
+    ticket: "DEMO-142",
+    created: "2026-06-26",
+    touchedMinutes: 1400,
+    lastTouched: "23h ago",
+    now: "Ready to pick up the dashboard scaffold after the last clean commit.",
+    next: "Launch a fresh workspace and continue the view model pass.",
+    signals: {
+      progress: "progress__dashboard-create.md",
+      taskState: "dashboard-create-task-state.md",
+      amq: "",
+      cmux: "",
+      runtime: "",
+      wake: "",
+      lastLaunch: "ok, 23h ago",
+      explicitNeed: ""
+    },
+    raw: [
+      "# Project: dashboard-create",
+      "**Ticket**: DEMO-142",
+      "**Now**: Ready to pick up the dashboard scaffold after the last clean commit.",
+      "**Next**: Launch a fresh workspace and continue the view model pass.",
+      "**Task State**: dashboard-create-task-state.md"
+    ].join("\n")
+  },
+  {
+    id: "orphan-terminal",
+    name: "orphan-terminal",
+    scope: "Ad-hoc workspace",
+    path: "/Users/example/git/worktrees/orphan-terminal",
+    ticket: "DEMO-155",
+    created: "2026-06-24",
+    touchedMinutes: 2500,
+    lastTouched: "2d ago",
+    now: "A cmux workspace exists, but there is no matching AMQ room.",
+    next: "Attach a room or close the stale workspace before launching again.",
+    signals: {
+      progress: "progress__orphan-terminal.md",
+      taskState: "orphan-terminal-task-state.md",
+      amq: "",
+      cmux: "workspace:9",
+      runtime: "terminal panes mapped",
+      wake: "",
+      lastLaunch: "ok, 2d ago",
+      explicitNeed: ""
+    },
+    raw: [
+      "# Project: orphan-terminal",
+      "**Ticket**: DEMO-155",
+      "**Now**: A cmux workspace exists, but there is no matching AMQ room.",
+      "**Next**: Attach a room or close the stale workspace before launching again.",
+      "**Task State**: orphan-terminal-task-state.md"
+    ].join("\n")
+  },
+  {
+    id: "release-notes",
+    name: "release-notes",
+    scope: "Personal playground",
+    path: "/Users/example/git/playground/release-notes",
+    ticket: "DEMO-101",
+    created: "2026-06-12",
+    touchedMinutes: 22000,
+    lastTouched: "15d ago",
+    now: "Progress is old enough that the resume card may be stale.",
+    next: "Refresh project metadata before creating a new workspace.",
+    signals: {
+      progress: "progress__release-notes.md",
+      taskState: "release-notes-task-state.md",
+      amq: "",
+      cmux: "",
+      runtime: "",
+      wake: "",
+      lastLaunch: "ok, 15d ago",
+      explicitNeed: ""
+    },
+    raw: [
+      "# Project: release-notes",
+      "**Ticket**: DEMO-101",
+      "**Now**: Progress is old enough that the resume card may be stale.",
+      "**Next**: Refresh project metadata before creating a new workspace.",
+      "**Task State**: release-notes-task-state.md"
+    ].join("\n")
+  },
+  {
+    id: "legacy-cleanup",
+    name: "legacy-cleanup",
+    scope: "Archive",
+    path: "/Users/example/git/archive/legacy-cleanup",
+    ticket: "DEMO-090",
+    created: "2026-05-30",
+    touchedMinutes: 48000,
+    lastTouched: "33d ago",
+    archived: true,
+    now: "Archived after the cleanup writeup was accepted.",
+    next: "Restore only if the old cleanup notes become active again.",
+    signals: {
+      progress: "archive/progress__legacy-cleanup.md",
+      taskState: "legacy-cleanup-task-state.md",
+      amq: "",
+      cmux: "",
+      runtime: "",
+      wake: "",
+      lastLaunch: "archived",
+      explicitNeed: ""
+    },
+    raw: [
+      "# Project: legacy-cleanup",
+      "**Ticket**: DEMO-090",
+      "**Now**: Archived after the cleanup writeup was accepted.",
+      "**Next**: Restore only if the old cleanup notes become active again.",
+      "**Task State**: legacy-cleanup-task-state.md"
+    ].join("\n")
+  }
+];
+
+const filters = [
+  { id: "attention", label: "Needs attention" },
+  { id: "running", label: "Running" },
+  { id: "ready", label: "Ready" },
+  { id: "stale", label: "Stale" },
+  { id: "archive", label: "Archive" }
+];
+
+const stateFilters = [
+  { id: "all", label: "All states" },
+  { id: "split", label: "AMQ/cmux split" },
+  { id: "needsYou", label: "Needs you" }
+];
+
+const state = {
+  filter: "attention",
+  stateFilter: "all",
+  sort: "attention",
+  selectedId: "report-refresh"
+};
+
+function compute(project) {
+  const s = project.signals;
+  const stale = !project.archived && project.touchedMinutes > 10080;
+  const needsYou = Boolean(s.explicitNeed);
+  let primary = { key: "ready", label: "Ready", tone: "ok" };
+  const tags = [];
+  let nextAction = "Launch";
+  let blocked = false;
+  let plan = `Will create a cmux workspace and AMQ session ${project.id}.`;
+  let commands = [];
+  let actionButtons = [{ label: "Launch workspace", tone: "primary" }];
+
+  if (project.archived) {
+    primary = { key: "archive", label: "Archived", tone: "gray" };
+    nextAction = "Restore";
+    plan = "Archived project. Restore progress before any launch action.";
+    actionButtons = [{ label: "Restore project", tone: "" }];
+  } else if (s.wake) {
+    primary = { key: "wake", label: "Wake conflict", tone: "bad" };
+    tags.push({ label: "Needs cleanup", tone: "bad" });
+    nextAction = "Inspect wake";
+    blocked = true;
+    plan = `Blocked: wake lock ${s.wake} exists for this project.`;
+    commands = [`amq wake list --session ${project.id}`, `rm ~/Library/Application\\ Support/cmux/wake/${project.id}.lock`];
+    actionButtons = [{ label: "Inspect wake", tone: "bad" }];
+  } else if (s.amq && !s.cmux) {
+    primary = { key: "cleanup", label: "Needs cleanup", tone: "bad" };
+    tags.push({ label: "AMQ only", tone: "warn" });
+    nextAction = "Clean AMQ";
+    blocked = true;
+    plan = "Blocked: AMQ session exists without a matching cmux workspace.";
+    commands = [`amq who --session ${s.amq}`, `amq wake --session ${s.amq}`, `cmux workspace list --json`];
+    actionButtons = [{ label: "Copy cleanup commands", tone: "bad" }];
+  } else if (!s.amq && s.cmux) {
+    primary = { key: "cleanup", label: "Needs cleanup", tone: "warn" };
+    tags.push({ label: "cmux only", tone: "warn" });
+    nextAction = "Attach or close";
+    blocked = true;
+    plan = `Blocked: ${s.cmux} exists without a matching AMQ session.`;
+    commands = [`cmux workspace select ${s.cmux}`, `cmux workspace close ${s.cmux}`];
+    actionButtons = [{ label: "Select workspace", tone: "warn" }, { label: "Close workspace", tone: "" }];
+  } else if (s.runtime && s.cmux && s.amq) {
+    primary = { key: "running", label: "Running", tone: "run" };
+    nextAction = "Reattach";
+    plan = `Will reattach ${s.cmux} and keep AMQ session ${s.amq}.`;
+    actionButtons = [{ label: "Reattach workspace", tone: "primary" }];
+  } else if (!s.taskState) {
+    primary = { key: "missing", label: "Missing task state", tone: "warn" };
+    nextAction = "Create state";
+    blocked = true;
+    plan = "Blocked: progress exists, but no linked task-state file was found.";
+    commands = [`mkdir -p ~/.claude/projects/demo/memory`, `touch ~/.claude/projects/demo/memory/${project.id}-task-state.md`];
+    actionButtons = [{ label: "Create task-state", tone: "warn" }];
+  } else if (stale) {
+    primary = { key: "stale", label: "Stale", tone: "warn" };
+    nextAction = "Refresh";
+    blocked = true;
+    plan = "Blocked: project snapshot is older than the stale threshold.";
+    commands = [`/start ${project.id}`, `amq list --new --session ${project.id}`];
+    actionButtons = [{ label: "Refresh snapshot", tone: "warn" }];
+  }
+
+  if (needsYou) tags.push({ label: "Needs you", tone: "note" });
+  if (!s.taskState && primary.key !== "missing") tags.push({ label: "Missing task state", tone: "warn" });
+
+  const attentionRank = (
+    project.archived ? 80 :
+    primary.key === "cleanup" ? 0 :
+    primary.key === "wake" ? 1 :
+    primary.key === "missing" ? 2 :
+    needsYou ? 3 :
+    primary.key === "stale" ? 4 :
+    primary.key === "running" ? 5 :
+    8
+  );
+
+  return { primary, tags, nextAction, blocked, plan, commands, actionButtons, stale, needsYou, attentionRank };
+}
+
+function matchesFilter(project) {
+  const c = compute(project);
+  const primary = c.primary.key;
+  if (state.filter === "attention" && project.archived) return false;
+  if (state.filter === "running" && primary !== "running") return false;
+  if (state.filter === "ready" && primary !== "ready") return false;
+  if (state.filter === "stale" && primary !== "stale") return false;
+  if (state.filter === "archive" && !project.archived) return false;
+  if (state.stateFilter === "split" && !(project.signals.amq && !project.signals.cmux) && !(!project.signals.amq && project.signals.cmux)) return false;
+  if (state.stateFilter === "needsYou" && !c.needsYou) return false;
+  return true;
+}
+
+function sortedProjects() {
+  return projects.filter(matchesFilter).sort((a, b) => {
+    const ca = compute(a);
+    const cb = compute(b);
+    if (state.sort === "attention") return ca.attentionRank - cb.attentionRank || a.touchedMinutes - b.touchedMinutes;
+    if (state.sort === "lastTouched") return a.touchedMinutes - b.touchedMinutes;
+    if (state.sort === "created") return b.created.localeCompare(a.created);
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function esc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function renderSegments() {
+  document.getElementById("filters").innerHTML = filters.map(item => `
+    <button class="segment ${state.filter === item.id ? "active" : ""}" type="button" data-filter="${esc(item.id)}">${esc(item.label)}</button>
+  `).join("");
+  document.getElementById("statusFilters").innerHTML = stateFilters.map(item => `
+    <button class="segment ${state.stateFilter === item.id ? "active" : ""}" type="button" data-state-filter="${esc(item.id)}">${esc(item.label)}</button>
+  `).join("");
+}
+
+function renderMetrics() {
+  const computed = projects.map(p => ({ project: p, c: compute(p) }));
+  const count = key => computed.filter(item => item.c.primary.key === key).length;
+  const attention = computed.filter(item => item.c.attentionRank <= 4 && !item.project.archived).length;
+  const running = count("running");
+  const ready = count("ready");
+  const split = computed.filter(item => (item.project.signals.amq && !item.project.signals.cmux) || (!item.project.signals.amq && item.project.signals.cmux)).length;
+  document.getElementById("metrics").innerHTML = [
+    ["Attention", attention, "Projects blocked, stale, missing state, or explicitly addressed to you."],
+    ["Running", running, "Live projects with both AMQ and cmux evidence."],
+    ["Ready", ready, "Launchable projects with progress and task-state present."],
+    ["Split", split, "AMQ-only or cmux-only project state."]
+  ].map(([label, number, text]) => `
+    <div class="metric">
+      <div class="metric-number">${number}</div>
+      <div class="metric-label"><strong>${esc(label)}</strong><br>${esc(text)}</div>
+    </div>
+  `).join("");
+
+  const labels = [
+    ["Ready", count("ready")],
+    ["Running", count("running")],
+    ["Needs cleanup", count("cleanup")],
+    ["Missing task state", count("missing")],
+    ["Wake conflict", count("wake")],
+    ["Stale", count("stale")],
+    ["Archive", count("archive")]
+  ];
+  document.getElementById("healthKey").innerHTML = `<h2 class="rail-title">Health badges</h2>` + labels.map(([label, number]) => `
+    <div class="key-row"><span>${esc(label)}</span><span class="key-count">${number}</span></div>
+  `).join("");
+}
+
+function signalTone(value, warn) {
+  if (warn) return "warn";
+  return value ? "on" : "";
+}
+
+function renderProjectRow(project) {
+  const c = compute(project);
+  const s = project.signals;
+  const chips = [c.primary, ...c.tags].map(chip => `<span class="chip ${esc(chip.tone)}">${esc(chip.label)}</span>`).join("");
+  const signalDots = [
+    ["P", signalTone(s.progress)],
+    ["T", signalTone(s.taskState, !s.taskState)],
+    ["A", signalTone(s.amq, s.amq && !s.cmux)],
+    ["C", signalTone(s.cmux, s.cmux && !s.amq)],
+    ["R", signalTone(s.runtime)],
+    ["W", signalTone(!s.wake, s.wake)],
+    ["L", s.lastLaunch.includes("failed") ? "bad" : "on"]
+  ].map(([label, tone]) => `<span class="signal-dot ${tone}" title="${esc(label)}">${esc(label)}</span>`).join("");
+
+  return `
+    <button class="project-row ${state.selectedId === project.id ? "selected" : ""}" type="button" data-project="${esc(project.id)}">
+      <span class="project-title">
+        <span class="name-line"><span class="name">${esc(project.name)}</span></span>
+        <span class="scope">${esc(project.scope)} - ${esc(project.path)}</span>
+        <span class="summary-line">${esc(project.now)}</span>
+      </span>
+      <span class="chips">${chips}</span>
+      <span class="signals-strip" aria-label="Signals">${signalDots}</span>
+      <span class="action-cell">${esc(c.nextAction)}<br><span class="last-cell">${esc(project.lastTouched)}</span></span>
+    </button>
+  `;
+}
+
+function renderBoard() {
+  const list = sortedProjects();
+  if (!list.some(project => project.id === state.selectedId) && list[0]) state.selectedId = list[0].id;
+  document.getElementById("projectList").innerHTML = list.length
+    ? list.map(renderProjectRow).join("")
+    : `<div class="empty">No projects match this filter.</div>`;
+}
+
+function signalCard(label, value, tone) {
+  return `
+    <div class="signal-card ${esc(tone)}">
+      <strong>${esc(label)}</strong>
+      <span>${esc(value || "none")}</span>
+    </div>
+  `;
+}
+
+function renderDetail() {
+  const project = projects.find(item => item.id === state.selectedId) || sortedProjects()[0] || projects[0];
+  if (!project) return;
+  const c = compute(project);
+  const s = project.signals;
+  const chipHtml = [c.primary, ...c.tags].map(chip => `<span class="chip ${esc(chip.tone)}">${esc(chip.label)}</span>`).join("");
+  const previewTone = c.blocked ? "blocked" : c.primary.key === "running" ? "running" : "ready";
+  const actions = c.actionButtons.map(action => `<button class="btn ${esc(action.tone)}" type="button">${esc(action.label)}</button>`).join("");
+  const needs = c.needsYou
+    ? `<div class="need"><strong>Explicit signal</strong><span>${esc(s.explicitNeed)}</span></div>`
+    : `<div class="need"><strong>No needs-you signal</strong><span>No progress metadata, task-state marker, or AMQ message addressed to the user.</span></div>`;
+  const commands = c.commands.length ? `
+    <div class="section">
+      <h3 class="section-title">Commands</h3>
+      <div class="command-list">
+        ${c.commands.map(command => `
+          <div class="command">
+            <code>${esc(command)}</code>
+            <button class="copy" type="button" data-copy="${esc(command)}">Copy</button>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  ` : "";
+
+  document.getElementById("detail").innerHTML = `
+    <div class="detail-header">
+      <div>
+        <h1 class="detail-name">${esc(project.name)}</h1>
+        <div class="detail-sub">${esc(project.scope)}<br>${esc(project.path)}</div>
+      </div>
+      <div class="chips">${chipHtml}</div>
+    </div>
+
+    <section class="section">
+      <h3 class="section-title">Summary first</h3>
+      <dl class="summary-grid">
+        <dt>Now</dt><dd>${esc(project.now)}</dd>
+        <dt>Next</dt><dd>${esc(project.next)}</dd>
+        <dt>Ticket</dt><dd><code>${esc(project.ticket)}</code></dd>
+        <dt>Touched</dt><dd>${esc(project.lastTouched)}</dd>
+      </dl>
+    </section>
+
+    <section class="section">
+      <h3 class="section-title">Launch preview</h3>
+      <div class="preview ${previewTone}">
+        <div class="preview-line">
+          <span class="preview-label">${c.blocked ? "Blocked" : "Plan"}</span>
+          <span class="preview-text">${esc(c.plan)}</span>
+        </div>
+        <div class="preview-line">
+          <span class="preview-label">Action</span>
+          <span class="preview-text">${esc(c.nextAction)}</span>
+        </div>
+      </div>
+      <div class="actions">${actions}</div>
+    </section>
+
+    <section class="section">
+      <h3 class="section-title">Signals</h3>
+      <div class="signals-grid">
+        ${signalCard("Progress file", s.progress, s.progress ? "good" : "bad")}
+        ${signalCard("Task-state", s.taskState, s.taskState ? "good" : "warn")}
+        ${signalCard("AMQ session", s.amq, s.amq && !s.cmux ? "warn" : s.amq ? "good" : "")}
+        ${signalCard("cmux workspace", s.cmux, s.cmux && !s.amq ? "warn" : s.cmux ? "good" : "")}
+        ${signalCard("Runtime", s.runtime, s.runtime ? "good" : "")}
+        ${signalCard("Wake lock", s.wake, s.wake ? "bad" : "good")}
+        ${signalCard("Last launch", s.lastLaunch, s.lastLaunch.includes("failed") ? "bad" : "good")}
+        ${signalCard("Needs-you", s.explicitNeed, s.explicitNeed ? "warn" : "")}
+      </div>
+    </section>
+
+    <section class="section">
+      <h3 class="section-title">Needs you</h3>
+      <div class="needs-list">${needs}</div>
+    </section>
+
+    ${commands}
+
+    <section class="section">
+      <details>
+        <summary><span>Raw progress</span><span>${esc(project.signals.progress)}</span></summary>
+        <pre class="raw">${esc(project.raw)}</pre>
+      </details>
+    </section>
+  `;
+}
+
+function wireEvents() {
+  document.getElementById("filters").addEventListener("click", event => {
+    const button = event.target.closest("[data-filter]");
+    if (!button) return;
+    state.filter = button.dataset.filter;
+    render();
+  });
+  document.getElementById("statusFilters").addEventListener("click", event => {
+    const button = event.target.closest("[data-state-filter]");
+    if (!button) return;
+    state.stateFilter = button.dataset.stateFilter;
+    render();
+  });
+  document.getElementById("sortMode").addEventListener("change", event => {
+    state.sort = event.target.value;
+    render();
+  });
+  document.getElementById("projectList").addEventListener("click", event => {
+    const button = event.target.closest("[data-project]");
+    if (!button) return;
+    state.selectedId = button.dataset.project;
+    renderBoard();
+    renderDetail();
+  });
+  document.getElementById("detail").addEventListener("click", async event => {
+    const button = event.target.closest("[data-copy]");
+    if (!button) return;
+    try {
+      await navigator.clipboard.writeText(button.dataset.copy);
+      button.textContent = "Copied";
+      setTimeout(() => { button.textContent = "Copy"; }, 900);
+    } catch {
+      button.textContent = "Select";
+    }
+  });
+}
+
+function render() {
+  renderSegments();
+  renderMetrics();
+  renderBoard();
+  renderDetail();
+}
+
+wireEvents();
+render();
+</script>
+</body>
+</html>

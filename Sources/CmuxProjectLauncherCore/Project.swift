@@ -72,6 +72,35 @@ public struct ProjectTile: Identifiable, Equatable, Sendable {
         self.workspaceKind = workspaceKind
         self.worktreePath = worktreePath
     }
+
+    public func matchesSearchQuery(_ query: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+
+        let primaryFields = [
+            name,
+            plane,
+        ]
+        if primaryFields.contains(where: { $0.localizedCaseInsensitiveContains(trimmed) }) {
+            return true
+        }
+
+        if trimmed.count <= 2 {
+            return false
+        }
+
+        if status.localizedCaseInsensitiveContains(trimmed)
+            || workspaceKind.title.localizedCaseInsensitiveContains(trimmed)
+            || (worktreePath?.localizedCaseInsensitiveContains(trimmed) ?? false)
+            || resumeCard.localizedCaseInsensitiveContains(trimmed) {
+            return true
+        }
+
+        return historyEntries.contains { entry in
+            entry.title.localizedCaseInsensitiveContains(trimmed)
+                || entry.body.localizedCaseInsensitiveContains(trimmed)
+        }
+    }
 }
 
 public enum ProjectSortMode: String, CaseIterable, Identifiable, Sendable {

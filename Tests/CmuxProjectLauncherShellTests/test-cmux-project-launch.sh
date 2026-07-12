@@ -663,7 +663,8 @@ grep -Fq 'not active' "$tmp_dir/stderr.log"
 : >"$select_log"
 : >"$open_log"
 : >"$close_log"
-if CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
+CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-3 \
   CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
   CMUX_FAKE_CREATE_LOG="$create_log" \
@@ -676,17 +677,18 @@ if CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
   CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
   CMUX_PROJECT_LAUNCHER_POLL=1 \
   CMUX_PROJECT_LAUNCHER_WAIT=0 \
-    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
-  printf 'active-amq-without-workspace launch unexpectedly succeeded\n' >&2
-  exit 1
-fi
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
 
-grep -Fq 'already active' "$tmp_dir/stderr.log"
-[[ ! -s "$send_log" ]]
-[[ ! -s "$key_log" ]]
-[[ ! -s "$create_log" ]]
+grep -Fq 'Allocating a separate AMQ session instead' "$tmp_dir/stderr.log"
+grep -Fq $'surface:26\t$start demo-project' "$send_log"
+grep -Fq $'surface:27\t/start demo-project' "$send_log"
+grep -Fq $'surface:26\tenter' "$key_log"
+grep -Fq $'surface:27\tenter' "$key_log"
+grep -Fq 'demo-project-3' "$create_log"
+grep -Fq 'Launched demo-project in workspace:10 using AMQ session demo-project-3' "$stdout_log"
 [[ ! -s "$select_log" ]]
 [[ ! -s "$open_log" ]]
+[[ ! -s "$close_log" ]]
 
 : >"$send_log"
 : >"$key_log"
@@ -705,7 +707,8 @@ printf '{"pid":%s}\n' "$wake_pid_codex" >"$fake_amq_root/demo-project/agents/cod
 wake_pid_claude=$!
 background_pids+=("$wake_pid_claude")
 printf '{"pid":%s}\n' "$wake_pid_claude" >"$fake_amq_root/demo-project-2/agents/claude/.wake.lock"
-if CMUX_FAKE_SEND_LOG="$send_log" \
+CMUX_FAKE_EXPECT_SESSION=demo-project-3 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
   CMUX_FAKE_CREATE_LOG="$create_log" \
   CMUX_FAKE_SELECT_LOG="$select_log" \
@@ -717,17 +720,18 @@ if CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
   CMUX_PROJECT_LAUNCHER_POLL=1 \
   CMUX_PROJECT_LAUNCHER_WAIT=0 \
-    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
-  printf 'wake-lock-without-workspace launch unexpectedly succeeded\n' >&2
-  exit 1
-fi
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
 
-grep -Fq 'already active' "$tmp_dir/stderr.log"
-[[ ! -s "$send_log" ]]
-[[ ! -s "$key_log" ]]
-[[ ! -s "$create_log" ]]
+grep -Fq 'Allocating a separate AMQ session instead' "$tmp_dir/stderr.log"
+grep -Fq $'surface:26\t$start demo-project' "$send_log"
+grep -Fq $'surface:27\t/start demo-project' "$send_log"
+grep -Fq $'surface:26\tenter' "$key_log"
+grep -Fq $'surface:27\tenter' "$key_log"
+grep -Fq 'demo-project-3' "$create_log"
+grep -Fq 'Launched demo-project in workspace:10 using AMQ session demo-project-3' "$stdout_log"
 [[ ! -s "$select_log" ]]
 [[ ! -s "$open_log" ]]
+[[ ! -s "$close_log" ]]
 rm -rf "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
 
 : >"$send_log"

@@ -76,6 +76,51 @@ final class ProgressProjectStoreTests: XCTestCase {
         XCTAssertEqual(sorted.first?.name, "newer")
     }
 
+    func testProjectSearchAllowsTwoLetterProjectNames() {
+        let exactShortName = ProjectTile(
+            name: "pr",
+            status: "Active",
+            plane: "",
+            lastUpdated: nil,
+            createdAt: nil,
+            resumeCard: "",
+            startHere: "",
+            fileURL: URL(fileURLWithPath: "/tmp/progress__pr.md"),
+            workspaceKind: .personal
+        )
+        let productionNoise = ProjectTile(
+            name: "billing",
+            status: "Active",
+            plane: "",
+            lastUpdated: nil,
+            createdAt: nil,
+            resumeCard: "Project setup notes",
+            startHere: "",
+            fileURL: URL(fileURLWithPath: "/tmp/progress__billing.md"),
+            workspaceKind: .production
+        )
+
+        XCTAssertTrue(exactShortName.matchesSearchQuery("pr"))
+        XCTAssertFalse(productionNoise.matchesSearchQuery("pr"))
+    }
+
+    func testProjectSearchKeepsBroadFieldsForLongerQueries() {
+        let project = ProjectTile(
+            name: "billing",
+            status: "Active",
+            plane: "",
+            lastUpdated: nil,
+            createdAt: nil,
+            resumeCard: "Project setup notes",
+            startHere: "",
+            fileURL: URL(fileURLWithPath: "/tmp/progress__billing.md"),
+            workspaceKind: .production
+        )
+
+        XCTAssertTrue(project.matchesSearchQuery("prod"))
+        XCTAssertTrue(project.matchesSearchQuery("setup"))
+    }
+
     func testRejectsUnsafeProjectNames() {
         XCTAssertNoThrow(try ProgressProjectStore.validateProjectName("demo-project-v1"))
         XCTAssertThrowsError(try ProgressProjectStore.validateProjectName("../demo-project"))

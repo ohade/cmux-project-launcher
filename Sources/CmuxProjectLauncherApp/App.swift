@@ -27,7 +27,11 @@ final class LauncherViewModel: ObservableObject {
     @Published var projects: [ProjectTile] = []
     @Published var archivedProjects: [ProjectTile] = []
     @Published var query = ""
-    @Published var sortMode: ProjectSortMode = .lastTouched
+    @Published var sortMode: ProjectSortMode {
+        didSet {
+            UserDefaults.standard.set(sortMode.rawValue, forKey: Self.sortModeDefaultsKey)
+        }
+    }
     @Published var listMode: ProjectListMode = .active {
         didSet {
             guard oldValue != listMode else { return }
@@ -67,26 +71,19 @@ final class LauncherViewModel: ObservableObject {
 
     private let store: ProgressProjectStore
     private let launcher: CmuxLauncher
+    private static let sortModeDefaultsKey = "projectSortMode"
 
     init(store: ProgressProjectStore = ProgressProjectStore(), launcher: CmuxLauncher = CmuxLauncher()) {
         self.store = store
         self.launcher = launcher
+        let savedSortMode = UserDefaults.standard.string(forKey: Self.sortModeDefaultsKey)
+            .flatMap(ProjectSortMode.init(rawValue:))
+        self.sortMode = savedSortMode ?? .lastTouched
     }
 
     var visibleProjects: [ProjectTile] {
         let filtered = sourceProjects.filter { project in
-            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return true }
-            return project.name.localizedCaseInsensitiveContains(trimmed)
-                || project.status.localizedCaseInsensitiveContains(trimmed)
-                || project.plane.localizedCaseInsensitiveContains(trimmed)
-                || project.workspaceKind.title.localizedCaseInsensitiveContains(trimmed)
-                || (project.worktreePath?.localizedCaseInsensitiveContains(trimmed) ?? false)
-                || project.resumeCard.localizedCaseInsensitiveContains(trimmed)
-                || project.historyEntries.contains { entry in
-                    entry.title.localizedCaseInsensitiveContains(trimmed)
-                        || entry.body.localizedCaseInsensitiveContains(trimmed)
-                }
+            project.matchesSearchQuery(query)
         }
         return ProgressProjectStore.sort(filtered, by: sortMode)
     }

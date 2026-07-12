@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>cmux Project Launcher — Summary / Inbox mock</title>
+<!--
+  Static UI mock for the cmux Project Launcher detail pane.
+  Single self-contained file: embedded CSS + demo data + minimal vanilla JS.
+  Sample data is fictional (DEMO-* tickets, /Users/example paths) to match the
+  repository's public-readiness demo fixtures. No real project data.
+
+  Concept: the detail pane leads with a structured summary card built from
+  fields the app already parses (Now / Next / Ticket / Last touched), surfaces
+  items that need the operator (decisions, blockers) as a quiet attention list,
+  and keeps the raw progress file behind a collapsed disclosure as an escape
+  hatch. Feel: quiet macOS operational tool, not a marketing page.
+-->
+<style>
+  :root {
+    --canvas: #ffffff;
+    --sidebar: #f2f2f4;
+    --sidebar-top: #f7f7f9;
+    --card: #fbfbfd;
+    --separator: #e4e4e7;
+    --separator-strong: #d6d6da;
+    --ink: #1d1d1f;
+    --ink-secondary: #6c6c72;
+    --ink-tertiary: #9a9aa1;
+    --accent: #0a84ff;
+    --accent-soft: rgba(10, 132, 255, 0.12);
+    --ok: #34a853;
+    --attn: #e08a00;
+    --attn-soft: rgba(224, 138, 0, 0.10);
+    --attn-edge: rgba(224, 138, 0, 0.55);
+    --stop: #e0392b;
+    --stop-soft: rgba(224, 57, 43, 0.10);
+    --stop-edge: rgba(224, 57, 43, 0.5);
+    --idle: #9296a0;
+    --radius: 10px;
+    --radius-lg: 14px;
+    --shadow-card: 0 1px 2px rgba(0,0,0,0.05), 0 1px 6px rgba(0,0,0,0.04);
+    --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+    --font-mono: "SF Mono", ui-monospace, "Menlo", "Cascadia Code", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --canvas: #1e1e20;
+      --sidebar: #242427;
+      --sidebar-top: #2a2a2e;
+      --card: #262629;
+      --separator: #37373b;
+      --separator-strong: #3f3f44;
+      --ink: #f2f2f5;
+      --ink-secondary: #a3a3ab;
+      --ink-tertiary: #77777f;
+      --accent: #3a9bff;
+      --accent-soft: rgba(58, 155, 255, 0.16);
+      --ok: #4cc96a;
+      --attn: #f0a83a;
+      --attn-soft: rgba(240, 168, 58, 0.14);
+      --attn-edge: rgba(240, 168, 58, 0.55);
+      --stop: #ff6a5c;
+      --stop-soft: rgba(255, 106, 92, 0.14);
+      --stop-edge: rgba(255, 106, 92, 0.5);
+      --idle: #83838c;
+      --card: #262629;
+      --shadow-card: 0 1px 2px rgba(0,0,0,0.35), 0 1px 8px rgba(0,0,0,0.28);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: var(--font-ui);
+    color: var(--ink);
+    background: #c9c9cf;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 28px;
+    min-height: 100vh;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #131315; } }
+
+  /* ---- Window shell ------------------------------------------------- */
+  .window {
+    width: 100%;
+    max-width: 1080px;
+    height: min(720px, calc(100vh - 56px));
+    background: var(--canvas);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 22px 60px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.14);
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: 248px 1fr;
+    grid-template-rows: 44px 1fr;
+    border: 0.5px solid rgba(0,0,0,0.18);
+  }
+
+  .titlebar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 14px;
+    background: linear-gradient(var(--sidebar-top), var(--sidebar));
+    border-bottom: 0.5px solid var(--separator-strong);
+    -webkit-app-region: drag;
+  }
+  .traffic { display: flex; gap: 8px; align-items: center; }
+  .traffic span { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .traffic .r { background: #ff5f57; }
+  .traffic .y { background: #febc2e; }
+  .traffic .g { background: #28c840; }
+  .titlebar .app-title {
+    font-size: 13px; font-weight: 600; letter-spacing: -0.1px; color: var(--ink-secondary);
+  }
+  .titlebar .spacer { flex: 1; }
+  .search {
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(0,0,0,0.05);
+    border: 0.5px solid var(--separator-strong);
+    border-radius: 7px; padding: 4px 9px; width: 190px;
+    color: var(--ink-tertiary); font-size: 12.5px;
+  }
+  @media (prefers-color-scheme: dark) { .search { background: rgba(255,255,255,0.06); } }
+  .search svg { flex: none; }
+  .btn-new {
+    font-family: inherit; font-size: 12.5px; font-weight: 500;
+    color: #fff; background: var(--accent);
+    border: none; border-radius: 7px; padding: 5px 11px; cursor: pointer;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .btn-new:active { filter: brightness(0.94); }
+
+  /* ---- Sidebar ------------------------------------------------------ */
+  .sidebar {
+    background: var(--sidebar);
+    border-right: 0.5px solid var(--separator-strong);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    padding-top: 6px;
+  }
+  .side-group-label {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--ink-tertiary);
+    padding: 12px 16px 5px;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .side-group-label .chev { margin-left: auto; opacity: 0.6; }
+
+  .proj {
+    display: grid;
+    grid-template-columns: 16px 1fr auto;
+    grid-template-rows: auto auto;
+    column-gap: 8px;
+    align-items: center;
+    padding: 6px 14px 6px 13px;
+    margin: 1px 8px;
+    border-radius: 7px;
+    cursor: pointer;
+    position: relative;
+    border-left: 3px solid transparent;
+    transition: background 0.12s ease;
+  }
+  .proj:hover { background: rgba(0,0,0,0.045); }
+  @media (prefers-color-scheme: dark) { .proj:hover { background: rgba(255,255,255,0.05); } }
+  .proj.selected { background: var(--accent-soft); border-left-color: var(--accent); }
+  .proj.selected .proj-name { color: var(--ink); }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; grid-row: 1; grid-column: 1; justify-self: center; }
+  .dot.active { background: var(--ok); }
+  .dot.attn   { background: var(--attn); }
+  .dot.blocked{ background: var(--stop); }
+  .dot.idle   { background: var(--idle); }
+
+  .proj-name { grid-row: 1; grid-column: 2; font-size: 13px; font-weight: 500; color: var(--ink); letter-spacing: -0.1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .proj-time { grid-row: 1; grid-column: 3; font-size: 11px; color: var(--ink-tertiary); font-variant-numeric: tabular-nums; }
+  .proj-sub  { grid-row: 2; grid-column: 2 / -1; font-size: 11px; color: var(--ink-tertiary); font-family: var(--font-mono); display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+  .pip { font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 5px; line-height: 15px; }
+  .pip.attn { color: var(--attn); background: var(--attn-soft); }
+  .pip.blocked { color: var(--stop); background: var(--stop-soft); }
+
+  .side-spacer { flex: 1; }
+  .attention-rollup {
+    margin: 8px; padding: 10px 12px;
+    border-radius: 9px;
+    background: var(--card);
+    border: 0.5px solid var(--separator);
+  }
+  .attention-rollup .roll-head {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
+    color: var(--ink-secondary); margin-bottom: 7px;
+  }
+  .roll-line { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-secondary); padding: 2px 0; }
+  .roll-line .count { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .roll-swatch { width: 7px; height: 7px; border-radius: 50%; }
+
+  /* ---- Detail ------------------------------------------------------- */
+  .detail { overflow-y: auto; background: var(--canvas); }
+  .detail-inner { padding: 22px 26px 30px; max-width: 640px; }
+
+  .d-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .d-title { font-size: 21px; font-weight: 700; letter-spacing: -0.4px; margin: 0; }
+  .status-pill {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.2px;
+    padding: 3px 9px; border-radius: 20px; display: inline-flex; align-items: center; gap: 5px;
+  }
+  .status-pill .sdot { width: 7px; height: 7px; border-radius: 50%; }
+  .status-pill.active  { color: var(--ok);   background: rgba(52,168,83,0.12); }
+  .status-pill.attn    { color: var(--attn); background: var(--attn-soft); }
+  .status-pill.blocked { color: var(--stop); background: var(--stop-soft); }
+  .status-pill.idle    { color: var(--idle); background: rgba(146,150,160,0.14); }
+  .status-pill.active .sdot  { background: var(--ok); }
+  .status-pill.attn .sdot    { background: var(--attn); }
+  .status-pill.blocked .sdot { background: var(--stop); }
+  .status-pill.idle .sdot    { background: var(--idle); }
+  .scope-tag { font-size: 11px; font-weight: 500; color: var(--ink-tertiary); padding: 3px 8px; border: 0.5px solid var(--separator-strong); border-radius: 20px; }
+
+  .d-worktree { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-tertiary); margin: 8px 0 20px; display: flex; align-items: center; gap: 6px; }
+
+  /* Summary card — the hero */
+  .summary {
+    background: var(--card);
+    border: 0.5px solid var(--separator);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+  .sum-row { display: grid; grid-template-columns: 62px 1fr; gap: 14px; padding: 14px 16px; align-items: start; }
+  .sum-row + .sum-row { border-top: 0.5px solid var(--separator); }
+  .sum-key { font-size: 11px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; color: var(--ink-tertiary); padding-top: 2px; }
+  .sum-val { font-size: 14.5px; line-height: 1.42; color: var(--ink); font-weight: 450; }
+  .sum-row.now .sum-val { font-weight: 500; }
+  .sum-meta { display: flex; gap: 26px; padding: 12px 16px; background: rgba(0,0,0,0.015); border-top: 0.5px solid var(--separator); }
+  @media (prefers-color-scheme: dark) { .sum-meta { background: rgba(255,255,255,0.02); } }
+  .meta-item { display: flex; flex-direction: column; gap: 2px; }
+  .meta-k { font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ink-tertiary); }
+  .meta-v { font-size: 13px; font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .meta-v.ticket { font-family: var(--font-mono); }
+
+  /* Attention / inbox */
+  .attention { margin-top: 20px; }
+  .att-head { font-size: 12px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase; color: var(--ink-secondary); display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+  .att-head .n { font-weight: 700; color: var(--ink); }
+  .att-item {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
+    padding: 10px 13px; border-radius: 9px; margin-bottom: 7px;
+    border: 0.5px solid var(--separator);
+    border-left: 3px solid var(--separator-strong);
+    background: var(--card);
+  }
+  .att-item.decision { border-left-color: var(--attn-edge); background: var(--attn-soft); }
+  .att-item.blocked  { border-left-color: var(--stop-edge); background: var(--stop-soft); }
+  .att-kind { font-size: 10px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+  .att-item.decision .att-kind { color: var(--attn); background: rgba(224,138,0,0.16); }
+  .att-item.blocked  .att-kind { color: var(--stop); background: rgba(224,57,43,0.16); }
+  .att-text { font-size: 13.5px; color: var(--ink); line-height: 1.35; }
+  .att-text .aside { display: block; font-size: 11.5px; color: var(--ink-tertiary); margin-top: 2px; }
+  .att-go { font-size: 12px; color: var(--accent); font-weight: 500; white-space: nowrap; cursor: pointer; }
+  .att-empty { font-size: 13px; color: var(--ink-tertiary); padding: 12px 13px; border: 0.5px dashed var(--separator-strong); border-radius: 9px; display: flex; align-items: center; gap: 8px; }
+
+  /* Operator capture and next-load injections */
+  .capture {
+    margin-top: 20px;
+    background: var(--card);
+    border: 0.5px solid var(--separator);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+  .capture-head,
+  .fork-head {
+    padding: 12px 15px;
+    border-bottom: 0.5px solid var(--separator);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .capture-title,
+  .fork-title {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.45px;
+    text-transform: uppercase;
+    color: var(--ink-secondary);
+  }
+  .capture-hint,
+  .fork-hint {
+    margin-left: auto;
+    font-size: 11.5px;
+    color: var(--ink-tertiary);
+  }
+  .composer {
+    padding: 13px 15px 14px;
+  }
+  .type-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .type-chip {
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink-secondary);
+    background: rgba(0,0,0,0.035);
+    border: 0.5px solid var(--separator);
+    border-radius: 7px;
+    padding: 4px 8px;
+  }
+  @media (prefers-color-scheme: dark) { .type-chip { background: rgba(255,255,255,0.055); } }
+  .type-chip.selected {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-color: rgba(10,132,255,0.35);
+  }
+  .compose-box {
+    width: 100%;
+    min-height: 62px;
+    resize: vertical;
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--ink);
+    background: var(--canvas);
+    border: 0.5px solid var(--separator-strong);
+    border-radius: 8px;
+    padding: 9px 10px;
+  }
+  .compose-box::placeholder { color: var(--ink-tertiary); }
+  .compose-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 9px;
+  }
+  .compose-route {
+    font-size: 11.5px;
+    color: var(--ink-tertiary);
+    flex: 1;
+  }
+  .pending {
+    border-top: 0.5px solid var(--separator);
+    padding: 12px 15px 14px;
+  }
+  .pending-head {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.45px;
+    text-transform: uppercase;
+    color: var(--ink-tertiary);
+    margin-bottom: 8px;
+  }
+  .pending-item {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 9px 10px;
+    border: 0.5px solid var(--separator);
+    border-radius: 8px;
+    margin-bottom: 7px;
+    background: rgba(0,0,0,0.015);
+  }
+  @media (prefers-color-scheme: dark) { .pending-item { background: rgba(255,255,255,0.025); } }
+  .pending-item:last-child { margin-bottom: 0; }
+  .pending-kind {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--ink-secondary);
+    background: rgba(0,0,0,0.045);
+    border-radius: 5px;
+    padding: 2px 6px;
+  }
+  @media (prefers-color-scheme: dark) { .pending-kind { background: rgba(255,255,255,0.07); } }
+  .pending-text {
+    font-size: 13px;
+    color: var(--ink);
+    line-height: 1.35;
+  }
+  .route-chip {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 6px;
+    padding: 3px 7px;
+    white-space: nowrap;
+  }
+
+  /* Fork project */
+  .fork-panel {
+    margin-top: 18px;
+    background: var(--card);
+    border: 0.5px solid var(--separator);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+  .fork-body {
+    padding: 13px 15px 14px;
+  }
+  .fork-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .fork-field {
+    border: 0.5px solid var(--separator);
+    border-radius: 8px;
+    padding: 9px 10px;
+    background: rgba(0,0,0,0.015);
+  }
+  @media (prefers-color-scheme: dark) { .fork-field { background: rgba(255,255,255,0.025); } }
+  .fork-k {
+    display: block;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.45px;
+    text-transform: uppercase;
+    color: var(--ink-tertiary);
+    margin-bottom: 4px;
+  }
+  .fork-v {
+    font-size: 13px;
+    color: var(--ink);
+    line-height: 1.35;
+  }
+  .fork-v.mono { font-family: var(--font-mono); font-size: 12px; }
+  .fork-copy {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .copy-chip {
+    font-size: 11.5px;
+    color: var(--ink-secondary);
+    border: 0.5px solid var(--separator);
+    border-radius: 20px;
+    padding: 4px 8px;
+    background: rgba(0,0,0,0.02);
+  }
+  @media (prefers-color-scheme: dark) { .copy-chip { background: rgba(255,255,255,0.035); } }
+  .fork-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  @media (max-width: 720px) {
+    .fork-grid { grid-template-columns: 1fr; }
+  }
+
+  /* Disclosures */
+  .disclosures { margin-top: 22px; border-top: 0.5px solid var(--separator); }
+  details.disc { border-bottom: 0.5px solid var(--separator); }
+  details.disc > summary {
+    list-style: none; cursor: pointer; padding: 13px 2px; display: flex; align-items: center; gap: 9px;
+    font-size: 13px; font-weight: 500; color: var(--ink); user-select: none;
+  }
+  details.disc > summary::-webkit-details-marker { display: none; }
+  .disc-chev { transition: transform 0.15s ease; color: var(--ink-tertiary); flex: none; }
+  details.disc[open] > summary .disc-chev { transform: rotate(90deg); }
+  .disc-count { font-size: 11px; color: var(--ink-tertiary); font-variant-numeric: tabular-nums; }
+  .disc-badge { margin-left: auto; font-size: 11px; color: var(--ink-tertiary); font-weight: 400; }
+  .disc-badge.soon { padding: 1px 7px; border-radius: 5px; background: rgba(0,0,0,0.05); }
+  @media (prefers-color-scheme: dark) { .disc-badge.soon { background: rgba(255,255,255,0.06); } }
+  .disc-body { padding: 2px 2px 15px; }
+  .raw-progress {
+    font-family: var(--font-mono); font-size: 12px; line-height: 1.55; color: var(--ink-secondary);
+    background: rgba(0,0,0,0.025); border: 0.5px solid var(--separator); border-radius: 8px;
+    padding: 13px 15px; white-space: pre-wrap; overflow-x: auto; margin: 0;
+  }
+  @media (prefers-color-scheme: dark) { .raw-progress { background: rgba(0,0,0,0.25); } }
+  .mini-list { margin: 0; padding: 0; list-style: none; }
+  .mini-list li { font-size: 13px; color: var(--ink-secondary); padding: 6px 0; display: flex; gap: 9px; align-items: baseline; border-bottom: 0.5px solid var(--separator); }
+  .mini-list li:last-child { border-bottom: none; }
+  .mini-list .mono { font-family: var(--font-mono); font-size: 12px; color: var(--ink-tertiary); }
+  .pr-state { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--ok); }
+
+  /* Footer actions */
+  .actions { display: flex; gap: 10px; margin-top: 26px; }
+  .act {
+    font-family: inherit; font-size: 13px; font-weight: 500; border-radius: 8px; padding: 8px 16px; cursor: pointer;
+    border: 0.5px solid var(--separator-strong); background: var(--card); color: var(--ink);
+  }
+  .act:hover { background: rgba(0,0,0,0.03); }
+  @media (prefers-color-scheme: dark) { .act:hover { background: rgba(255,255,255,0.05); } }
+  .act.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .act.primary:hover { filter: brightness(0.96); background: var(--accent); }
+  .act:focus-visible, .proj:focus-visible, .btn-new:focus-visible, .type-chip:focus-visible, .compose-box:focus-visible, details.disc > summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+
+  .caption { font-size: 11px; color: var(--ink-tertiary); text-align: center; margin: 14px auto 0; max-width: 1080px; }
+
+  /* Responsive: collapse to single column, detail on top */
+  @media (max-width: 720px) {
+    body { padding: 0; }
+    .window { height: 100vh; max-width: none; border-radius: 0; grid-template-columns: 1fr; grid-template-rows: 44px auto 1fr; }
+    .sidebar { grid-row: 2; max-height: 220px; border-right: none; border-bottom: 0.5px solid var(--separator-strong); }
+    .detail { grid-row: 3; }
+    .side-spacer { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+  <main class="window" role="application" aria-label="cmux Project Launcher">
+    <!-- Title bar -->
+    <div class="titlebar">
+      <div class="traffic" aria-hidden="true"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+      <span class="app-title">cmux launcher</span>
+      <span class="spacer"></span>
+      <label class="search">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span>Search projects</span>
+      </label>
+      <button class="btn-new" type="button">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        New
+      </button>
+    </div>
+
+    <!-- Sidebar: project list + attention rollup -->
+    <nav class="sidebar" aria-label="Projects">
+      <div class="side-group-label">Production</div>
+      <div id="list-production"></div>
+      <div class="side-group-label">Personal</div>
+      <div id="list-personal"></div>
+      <div class="side-group-label">Archived <span class="chev" aria-hidden="true">›</span></div>
+
+      <div class="side-spacer"></div>
+
+      <div class="attention-rollup" aria-label="Items that need you">
+        <div class="roll-head">Needs you · <span id="roll-total">3</span></div>
+        <div class="roll-line"><span class="roll-swatch" style="background:var(--attn)"></span><span class="count" id="roll-dec">2</span>&nbsp;decisions</div>
+        <div class="roll-line"><span class="roll-swatch" style="background:var(--stop)"></span><span class="count" id="roll-blk">1</span>&nbsp;blocked</div>
+        <div class="roll-line"><span class="roll-swatch" style="background:var(--accent)"></span><span class="count" id="roll-inj">0</span>&nbsp;pending injections</div>
+      </div>
+    </nav>
+
+    <!-- Detail pane (rendered by JS) -->
+    <section class="detail" aria-live="polite">
+      <div class="detail-inner" id="detail"></div>
+    </section>
+  </main>
+  <p class="caption">Static UI mock · demo data only · cmux Project Launcher summary/inbox surface</p>
+
+<script>
+// ---- Demo data (fictional; mirrors public-readiness demo fixtures) --------
+const PROJECTS = [
+  {
+    id: "search-quality", scope: "production", status: "active",
+    ticket: "DEMO-101", time: "2h", timeFull: "Today, 11:20",
+    now: "Ranking experiment is live on the demo cohort; the sample report generates cleanly end to end.",
+    next: "Validate cache-hit behavior against the baseline, then widen the cohort to 5%.",
+    worktree: "~/git/worktrees/work/DEMO-101-search-quality",
+    attention: [],
+    pending: [
+      { kind: "todo", text: "Compare cache hit rate for the last 500 demo requests before widening the cohort.", route: "create Plane ticket" },
+      { kind: "knowledge", text: "The report generator already emits enough fields for a cache-hit sanity check.", route: "append progress note" }
+    ],
+    fork: {
+      name: "search-quality-cache-check",
+      objective: "Investigate cache-hit behavior without disturbing the ranking experiment rollout.",
+      copies: ["summary", "START HERE", "task-state history", "worktree path"],
+      skips: ["open PR ownership", "archive state"]
+    },
+    tasks: ["Confirm the measurement window with the demo dataset", "Widen cohort to 5% once cache check passes"],
+    prs: [{ n: "#412", t: "Add cache-hit counter to the ranking path", s: "open" }],
+    raw: `# Project: search-quality
+**Status**: Active
+**Plane**: DEMO-101
+**Last updated**: 2026-07-01 11:20
+
+## Resume Card
+search-quality — ranking experiment follow-up
+NEXT: validate the sample report and cache behavior, then widen the cohort.
+
+## START HERE
+Open the validation checklist and confirm the next query.`
+  },
+  {
+    id: "payments-refactor", scope: "production", status: "attn",
+    ticket: "DEMO-114", time: "40m", timeFull: "Today, 12:55",
+    now: "Settlement worker is split into its own service; the migration script is drafted and dry-runs clean on the demo DB.",
+    next: "Decide the backfill strategy, then run it against staging behind the flag.",
+    worktree: "~/git/worktrees/work/DEMO-114-payments-refactor",
+    attention: [
+      { kind: "decision", text: "Backfill in one pass or chunk by day?", aside: "Single pass is faster but locks the table ~8 min; chunked is safe but needs a resumable cursor." },
+      { kind: "decision", text: "Confirm the rollback window before enabling the flag", aside: "On-call wants it outside the 09:00–11:00 demo peak." }
+    ],
+    pending: [
+      { kind: "decision", text: "Ask operator to choose one-pass vs chunked backfill before the next resume.", route: "ask on thread" },
+      { kind: "comment", text: "If chunked wins, make the cursor resumable before touching staging.", route: "inject into START HERE" },
+      { kind: "knowledge", text: "Dry-run migration completed cleanly on the demo database.", route: "append progress note" }
+    ],
+    fork: {
+      name: "payments-backfill-plan",
+      objective: "Split out the backfill decision into a focused planning project with the parent context attached.",
+      copies: ["resume summary", "decision log", "task-state history", "Plane link"],
+      skips: ["running workspace", "archive action", "unrelated PRs"]
+    },
+    tasks: ["Draft resumable backfill cursor", "Wire settlement worker health check", "Add flag to staging config"],
+    prs: [{ n: "#438", t: "Extract settlement worker service", s: "open" }, { n: "#441", t: "Migration: settlements table split", s: "draft" }],
+    raw: `# Project: payments-refactor
+**Status**: Active
+**Plane**: DEMO-114
+**Last updated**: 2026-07-01 12:55
+
+## Resume Card
+payments-refactor — settlement worker extraction
+NEXT: decide backfill strategy (one pass vs daily chunks), then run on staging.
+OPEN DECISION: backfill strategy; rollback window with on-call.
+
+## START HERE
+Pick the backfill approach and update the migration runbook.`
+  },
+  {
+    id: "onboarding-flow", scope: "production", status: "blocked",
+    ticket: "DEMO-120", time: "1d", timeFull: "Yesterday, 16:10",
+    now: "New multi-step onboarding form is built and unit-tested; end-to-end run is stuck.",
+    next: "Unblock the email verification step — the demo mail sandbox is rejecting the template.",
+    worktree: "~/git/worktrees/work/DEMO-120-onboarding-flow",
+    attention: [
+      { kind: "blocked", text: "Email verification step fails in the demo mail sandbox", aside: "Template renders locally but the sandbox returns 422; waiting on a sandbox allowlist entry." }
+    ],
+    pending: [
+      { kind: "todo", text: "Create follow-up for sandbox allowlist owner and link it back here.", route: "create Plane ticket" },
+      { kind: "comment", text: "Do not rerun the full onboarding suite until the allowlist is confirmed.", route: "inject into START HERE" }
+    ],
+    fork: {
+      name: "onboarding-mail-sandbox",
+      objective: "Branch the sandbox unblocker out of the broader onboarding flow.",
+      copies: ["blocked state", "raw progress excerpt", "task-state history"],
+      skips: ["form UI tasks", "completed test notes"]
+    },
+    tasks: ["Get onboarding template allowlisted in the mail sandbox", "Re-run the e2e onboarding suite"],
+    prs: [{ n: "#455", t: "Multi-step onboarding form", s: "open" }],
+    raw: `# Project: onboarding-flow
+**Status**: Active
+**Plane**: DEMO-120
+**Last updated**: 2026-06-30 16:10
+
+## Resume Card
+onboarding-flow — multi-step signup
+NEXT: unblock email verification; sandbox rejects the template (422).
+BLOCKED: mail sandbox allowlist.
+
+## START HERE
+Chase the sandbox allowlist, then re-run the e2e suite.`
+  },
+  {
+    id: "cache-warmer", scope: "personal", status: "idle",
+    ticket: "DEMO-108", time: "9d", timeFull: "Jun 22",
+    now: "Prototype warms the demo cache on a cron; no measurable hit-rate change yet.",
+    next: "Revisit whether this is worth finishing or should be parked.",
+    worktree: "~/git/worktrees/personal/DEMO-108-cache-warmer",
+    attention: [],
+    pending: [
+      { kind: "comment", text: "Park unless a full-day measurement shows a measurable demo benefit.", route: "inject into START HERE" }
+    ],
+    fork: {
+      name: "cache-warmer-measurement",
+      objective: "Run a narrow measurement branch before deciding whether to keep the prototype.",
+      copies: ["resume summary", "measurement notes"],
+      skips: ["old cron experiment", "stale task list"]
+    },
+    tasks: ["Decide keep or park", "Measure hit-rate over a full demo day"],
+    prs: [],
+    raw: `# Project: cache-warmer
+**Status**: Active
+**Plane**: DEMO-108
+**Last updated**: 2026-06-22 09:05
+
+## Resume Card
+cache-warmer — cron prototype
+NEXT: decide keep-or-park; no hit-rate change observed yet.
+
+## START HERE
+Run one full-day measurement before deciding.`
+  }
+];
+
+const KIND_LABEL = { decision: "Decision", blocked: "Blocked" };
+const INJECTION_LABEL = { todo: "Todo", comment: "Comment", knowledge: "Knowledge", decision: "Decision" };
+const STATUS_LABEL = { active: "Active", attn: "Needs decision", blocked: "Blocked", idle: "Idle" };
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ---- Sidebar rows ----------------------------------------------------------
+function projRow(p, selectedId) {
+  const dotClass = p.status;
+  const decCount = p.attention.filter(a => a.kind === "decision").length;
+  const blkCount = p.attention.filter(a => a.kind === "blocked").length;
+  let pips = "";
+  if (decCount) pips += `<span class="pip attn">${decCount} decision${decCount > 1 ? "s" : ""}</span>`;
+  if (blkCount) pips += `<span class="pip blocked">blocked</span>`;
+  return `<div class="proj${p.id === selectedId ? " selected" : ""}" role="button" tabindex="0" data-id="${p.id}" aria-pressed="${p.id === selectedId}">
+    <span class="dot ${dotClass}" aria-hidden="true"></span>
+    <span class="proj-name">${esc(p.id)}</span>
+    <span class="proj-time">${esc(p.time)}</span>
+    <span class="proj-sub">${esc(p.ticket)}${pips}</span>
+  </div>`;
+}
+
+// ---- Detail pane -----------------------------------------------------------
+function attentionBlock(p) {
+  if (!p.attention.length) {
+    return `<div class="attention">
+      <div class="att-head">Attention</div>
+      <div class="att-empty"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 8.5l2.5 2.5L12 5.5" stroke="var(--ok)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Nothing needs you here. On track.</div>
+    </div>`;
+  }
+  const items = p.attention.map(a => `
+    <div class="att-item ${a.kind}">
+      <span class="att-kind">${KIND_LABEL[a.kind]}</span>
+      <span class="att-text">${esc(a.text)}<span class="aside">${esc(a.aside)}</span></span>
+      <span class="att-go" role="button" tabindex="0">Open ›</span>
+    </div>`).join("");
+  return `<div class="attention">
+    <div class="att-head">Needs you <span class="n">${p.attention.length}</span></div>
+    ${items}
+  </div>`;
+}
+
+function captureBlock(p) {
+  const pending = p.pending.length
+    ? p.pending.map(item => `
+      <div class="pending-item">
+        <span class="pending-kind">${INJECTION_LABEL[item.kind] || item.kind}</span>
+        <span class="pending-text">${esc(item.text)}</span>
+        <span class="route-chip">${esc(item.route)}</span>
+      </div>`).join("")
+    : `<div class="att-empty" style="border-style:dashed">No queued local notes. Add one to inject it on the next project load.</div>`;
+
+  return `<section class="capture" aria-label="Add local project item">
+    <div class="capture-head">
+      <span class="capture-title">Capture for next load</span>
+      <span class="capture-hint">saved with this project</span>
+    </div>
+    <div class="composer">
+      <div class="type-row" role="group" aria-label="Item type">
+        <button class="type-chip selected" type="button">Todo</button>
+        <button class="type-chip" type="button">Comment</button>
+        <button class="type-chip" type="button">Knowledge</button>
+        <button class="type-chip" type="button">Decision</button>
+      </div>
+      <textarea class="compose-box" aria-label="Project note" placeholder="Add a todo, comment, question, or knowledge note for the next project load.">Create a Plane ticket for the backfill choice if it is still undecided tomorrow.</textarea>
+      <div class="compose-foot">
+        <span class="compose-route">Next load routes by type: Todo -> Plane ticket, Knowledge -> progress note, Comment/Decision -> thread context.</span>
+        <button class="act primary" type="button">Queue item</button>
+      </div>
+    </div>
+    <div class="pending">
+      <div class="pending-head">Pending injections</div>
+      ${pending}
+    </div>
+  </section>`;
+}
+
+function forkBlock(p) {
+  return `<section class="fork-panel" aria-label="Fork project">
+    <div class="fork-head">
+      <span class="fork-title">Fork project</span>
+      <span class="fork-hint">branch from current context</span>
+    </div>
+    <div class="fork-body">
+      <div class="fork-grid">
+        <div class="fork-field">
+          <span class="fork-k">Parent</span>
+          <span class="fork-v mono">${esc(p.id)}</span>
+        </div>
+        <div class="fork-field">
+          <span class="fork-k">New fork</span>
+          <span class="fork-v mono">${esc(p.fork.name)}</span>
+        </div>
+        <div class="fork-field" style="grid-column:1 / -1">
+          <span class="fork-k">Focused objective</span>
+          <span class="fork-v">${esc(p.fork.objective)}</span>
+        </div>
+      </div>
+      <div class="fork-copy" aria-label="Context copied to fork">
+        ${p.fork.copies.map(x => `<span class="copy-chip">copy: ${esc(x)}</span>`).join("")}
+        ${p.fork.skips.map(x => `<span class="copy-chip">skip: ${esc(x)}</span>`).join("")}
+      </div>
+      <div class="fork-actions">
+        <button class="act" type="button">Preview context</button>
+        <button class="act primary" type="button">Create fork</button>
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderDetail(p) {
+  const prBody = p.prs.length
+    ? `<ul class="mini-list">${p.prs.map(pr => `<li><span class="mono">${esc(pr.n)}</span><span style="flex:1">${esc(pr.t)}</span><span class="pr-state" style="color:${pr.s === "draft" ? "var(--ink-tertiary)" : "var(--ok)"}">${esc(pr.s)}</span></li>`).join("")}</ul>`
+    : `<div class="att-empty" style="border-style:dashed">No open pull requests.</div>`;
+  const taskBody = `<ul class="mini-list">${p.tasks.map(t => `<li><span class="mono">›</span><span>${esc(t)}</span></li>`).join("")}</ul>`;
+
+  document.getElementById("detail").innerHTML = `
+    <div class="d-header">
+      <h1 class="d-title">${esc(p.id)}</h1>
+      <span class="status-pill ${p.status}"><span class="sdot"></span>${STATUS_LABEL[p.status]}</span>
+      <span class="scope-tag">${p.scope === "production" ? "Production" : "Personal"}</span>
+    </div>
+    <div class="d-worktree">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5h5l1.2 1.4H14v6H2z" stroke="currentColor" stroke-width="1.2"/></svg>
+      ${esc(p.worktree)}
+    </div>
+
+    <div class="summary" aria-label="Project summary">
+      <div class="sum-row now"><div class="sum-key">Now</div><div class="sum-val">${esc(p.now)}</div></div>
+      <div class="sum-row next"><div class="sum-key">Next</div><div class="sum-val">${esc(p.next)}</div></div>
+      <div class="sum-meta">
+        <div class="meta-item"><span class="meta-k">Ticket</span><span class="meta-v ticket">${esc(p.ticket)}</span></div>
+        <div class="meta-item"><span class="meta-k">Last touched</span><span class="meta-v">${esc(p.timeFull)}</span></div>
+      </div>
+    </div>
+
+    ${attentionBlock(p)}
+
+    ${captureBlock(p)}
+
+    ${forkBlock(p)}
+
+    <div class="disclosures">
+      <details class="disc">
+        <summary><svg class="disc-chev" width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Raw progress<span class="disc-badge">progress__${esc(p.id)}.md</span></summary>
+        <div class="disc-body"><pre class="raw-progress">${esc(p.raw)}</pre></div>
+      </details>
+      <details class="disc">
+        <summary><svg class="disc-chev" width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Task state<span class="disc-count">${p.tasks.length} items</span></summary>
+        <div class="disc-body">${taskBody}</div>
+      </details>
+      <details class="disc">
+        <summary><svg class="disc-chev" width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Recent work<span class="disc-count">${p.prs.length} PR${p.prs.length === 1 ? "" : "s"}</span></summary>
+        <div class="disc-body">${prBody}</div>
+      </details>
+      <details class="disc">
+        <summary><svg class="disc-chev" width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Open tickets<span class="disc-badge soon">Later slice</span></summary>
+        <div class="disc-body"><div class="att-empty" style="border-style:dashed">Plane rollup lands in a later slice.</div></div>
+      </details>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" type="button">Resume workspace</button>
+      <button class="act" type="button">Archive</button>
+    </div>`;
+}
+
+// ---- Wire up ---------------------------------------------------------------
+let selectedId = "payments-refactor";
+
+function renderSidebar() {
+  const byScope = s => PROJECTS.filter(p => p.scope === s).map(p => projRow(p, selectedId)).join("");
+  document.getElementById("list-production").innerHTML = byScope("production");
+  document.getElementById("list-personal").innerHTML = byScope("personal");
+  const dec = PROJECTS.reduce((n, p) => n + p.attention.filter(a => a.kind === "decision").length, 0);
+  const blk = PROJECTS.reduce((n, p) => n + p.attention.filter(a => a.kind === "blocked").length, 0);
+  const inj = PROJECTS.reduce((n, p) => n + p.pending.length, 0);
+  document.getElementById("roll-dec").textContent = dec;
+  document.getElementById("roll-blk").textContent = blk;
+  document.getElementById("roll-inj").textContent = inj;
+  document.getElementById("roll-total").textContent = dec + blk + inj;
+}
+
+function select(id) {
+  selectedId = id;
+  renderSidebar();
+  renderDetail(PROJECTS.find(p => p.id === id));
+}
+
+document.querySelector(".sidebar").addEventListener("click", e => {
+  const row = e.target.closest(".proj");
+  if (row) select(row.dataset.id);
+});
+document.querySelector(".sidebar").addEventListener("keydown", e => {
+  const row = e.target.closest(".proj");
+  if (row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(row.dataset.id); }
+});
+
+renderSidebar();
+renderDetail(PROJECTS.find(p => p.id === selectedId));
+</script>
+</body>
+</html>
