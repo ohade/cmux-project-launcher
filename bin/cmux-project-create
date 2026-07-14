@@ -101,7 +101,7 @@ enter_delay_seconds="${CMUX_PROJECT_LAUNCHER_ENTER_DELAY:-0.5}"
 enter_retries="${CMUX_PROJECT_LAUNCHER_ENTER_RETRIES:-3}"
 submit_confirm_wait_seconds="${CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT:-4}"
 input_probe_lines="${CMUX_PROJECT_LAUNCHER_INPUT_LINES:-18}"
-codex_ready_regex="${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
+codex_ready_regex="${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-OpenAI Codex|gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
 claude_ready_regex="${CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX:-Claude Code|Welcome to Claude|Opus [0-9]|Sonnet [0-9]|bypass permissions}"
 start_details_regex="${CMUX_PROJECT_LAUNCHER_START_DETAILS_REGEX:-task goal|first concrete step|describe the task|project details|what.*build|what.*work}"
 keep_failed_workspace="${CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE:-0}"
@@ -427,7 +427,7 @@ run_draft_mode() {
 }
 
 allocate_create_session() {
-  local base="cml-${project}-create"
+  local base="$project"
   local candidate="$base"
   local n=2
   while session_in_use "$candidate"; do
@@ -458,7 +458,8 @@ helper_readiness_error() {
   debug="$(surface_debug_block "$claude_surface")"
   cat >&2 <<ERR
 cmux created $workspace_ref, but the create helper agents did not become ready.
-AMQ session: $amq_session
+Project name: $project
+AMQ room: $amq_session
 Codex surface: ${codex_surface:-<unresolved>}
 Expected Codex boot regex: $codex_ready_regex
 Claude surface: $claude_surface

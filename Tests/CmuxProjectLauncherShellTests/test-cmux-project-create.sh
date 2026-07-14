@@ -79,7 +79,7 @@ cat >"$fake_amq" <<'SH'
 set -euo pipefail
 case "${1:?missing command}" in
   who)
-    printf '[]\n'
+    printf '%s\n' "${CMUX_FAKE_AMQ_WHO_JSON:-[]}"
     ;;
   env)
     printf '{"base_root":"%s","root":"%s"}\n' "${CMUX_FAKE_AMQ_ROOT:?}" "${CMUX_FAKE_AMQ_ROOT:?}"
@@ -153,8 +153,13 @@ case "$cmd" in
     case "$subcmd" in
       create)
         layout=""
+        name=""
         while [[ $# -gt 0 ]]; do
           case "$1" in
+            --name)
+              name="${2:?missing workspace name}"
+              shift 2
+              ;;
             --layout)
               layout="${2:?missing layout}"
               shift 2
@@ -164,9 +169,11 @@ case "$cmd" in
               ;;
           esac
         done
-        [[ "$layout" == *"coopcodex cml-display-create"* ]]
-        [[ "$layout" == *"coopcc cml-display-create"* ]]
-        printf '%s\n' "$layout" >>"${CMUX_FAKE_CREATE_LOG:?}"
+        expected_session="${CMUX_FAKE_EXPECT_SESSION:-display}"
+        [[ "$name" == "$expected_session" ]]
+        [[ "$layout" == *"coopcodex $expected_session"* ]]
+        [[ "$layout" == *"coopcc $expected_session"* ]]
+        printf '%s\t%s\n' "$name" "$layout" >>"${CMUX_FAKE_CREATE_LOG:?}"
         printf 'OK workspace:42\n'
         ;;
       close)
@@ -230,7 +237,7 @@ case "$cmd" in
     done
     if [[ "$surface" == "surface:26" ]]; then
       printf 'OpenAI Codex\n'
-      printf 'gpt-5 Ready\n'
+      printf 'gpt-5.4 100%% left\n'
       exit 0
     fi
     if [[ "${CMUX_FAKE_READ_FAIL_AFTER_START:-0}" == "1" && -f "${CMUX_FAKE_FAIL_AFTER_START_MARKER:?}" ]]; then
@@ -402,8 +409,39 @@ fi
 grep -Fq '"direction":"horizontal"' "$create_log"
 grep -Fq '"name":"Codex"' "$create_log"
 grep -Fq '"name":"Claude"' "$create_log"
-grep -Fq 'coopcodex cml-display-create' "$create_log"
-grep -Fq 'coopcc cml-display-create' "$create_log"
+[[ "$(cut -f1 "$create_log")" == "display" ]]
+grep -Fq 'coopcodex display' "$create_log"
+grep -Fq 'coopcc display' "$create_log"
+grep -Fq 'using AMQ session display' "$stdout_log"
+if grep -Fq 'cml-display-create' "$create_log"; then
+  printf 'create leaked the internal helper prefix into the persistent workspace\n' >&2
+  exit 1
+fi
+
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$close_log"
+rm -f "$fake_progress/progress__display.md"
+CMUX_FAKE_AMQ_WHO_JSON='[{"name":"display","agents":[{"active":true}]}]' \
+CMUX_FAKE_EXPECT_SESSION=display-2 \
+CMUX_FAKE_SEND_LOG="$send_log" \
+CMUX_FAKE_KEY_LOG="$key_log" \
+CMUX_FAKE_CREATE_LOG="$create_log" \
+CMUX_FAKE_CLOSE_LOG="$close_log" \
+CMUX_FAKE_PROGRESS_ROOT="$fake_progress" \
+CMUX_FAKE_AMQ_ROOT="$tmp_dir/amq-root" \
+CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+CMUX_PROJECT_LAUNCHER_PROGRESS_ROOT="$fake_progress" \
+CMUX_PROJECT_LAUNCHER_POLL=1 \
+  $create_bash "$repo_root/bin/cmux-project-create" --mode create --project display --brief-file "$brief_file" >"$stdout_log"
+
+[[ "$(cut -f1 "$create_log")" == "display-2" ]]
+grep -Fq 'coopcodex display-2' "$create_log"
+grep -Fq 'coopcc display-2' "$create_log"
+grep -Fq 'using AMQ session display-2' "$stdout_log"
+[[ ! -s "$close_log" ]]
 
 : >"$send_log"
 : >"$key_log"
@@ -422,7 +460,11 @@ CMUX_PROJECT_LAUNCHER_POLL=1 \
 grep -Fq 'cmux workspace create' "$stdout_log"
 grep -Fq 'coopcodex' "$stdout_log"
 grep -Fq 'coopcc' "$stdout_log"
-grep -Fq 'cml-display-create' "$stdout_log"
+grep -Fq -- '--name display' "$stdout_log"
+if grep -Fq 'cml-display-create' "$stdout_log"; then
+  printf 'dry-run leaked the internal helper prefix\n' >&2
+  exit 1
+fi
 grep -Fq 'Codex boot regex:' "$stdout_log"
 grep -Fq 'Claude boot regex:' "$stdout_log"
 grep -Fq 'Gate B regex:' "$stdout_log"
