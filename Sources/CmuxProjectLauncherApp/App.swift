@@ -193,6 +193,32 @@ final class LauncherViewModel: ObservableObject {
         createProject(createExact: false)
     }
 
+    func creationFormState(for draft: ProjectCreationDraft) -> ProjectCreationFormState {
+        let normalized = draft.normalized
+        let existing: ExistingProjectLocation?
+        if !normalized.name.isEmpty,
+           (try? ProgressProjectStore.validateProjectName(normalized.name)) != nil {
+            let activeURL = projects.first(where: { $0.name == normalized.name })?.fileURL
+            let archivedURL = archivedProjects.first(where: { $0.name == normalized.name })?.fileURL
+            switch (activeURL, archivedURL) {
+            case (.some(let active), .some(let archived)):
+                existing = .activeAndArchived(active: active, archived: archived)
+            case (.some(let active), .none):
+                existing = .active(active)
+            case (.none, .some(let archived)):
+                existing = .archived(archived)
+            case (.none, .none):
+                existing = nil
+            }
+        } else {
+            existing = nil
+        }
+        return normalized.creationFormState(
+            existingProject: existing,
+            usesFixtureFallback: usesFixtureFallback
+        )
+    }
+
     func createProject(createExact: Bool) {
         guard draftingProject == nil, creatingProject == nil else { return }
         do {
@@ -1074,21 +1100,41 @@ struct CreationFormView: View {
         model.draftingProject != nil || model.creatingProject != nil
     }
 
+    private var formState: ProjectCreationFormState {
+        model.creationFormState(for: model.createDraft)
+    }
+
     var body: some View {
+        let state = formState
         VStack(alignment: .leading, spacing: 10) {
             if showsTitle {
                 Text("Create Project")
                     .font(.headline)
             }
 
-            TextField("project-name", text: $model.createDraft.name)
-                .textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Project Name (required)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField("e.g. refactor_rtb_tests", text: $model.createDraft.name)
+                    .textFieldStyle(.roundedBorder)
+            }
 
-            TextField("Jira ticket or URL", text: $model.createDraft.jira)
-                .textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Jira Ticket or URL (optional)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField("e.g. PROJ-123 or ticket URL", text: $model.createDraft.jira)
+                    .textFieldStyle(.roundedBorder)
+            }
 
-            TextField("Plane workspace or issue", text: $model.createDraft.plane)
-                .textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Plane Workspace or Issue (optional)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField("Workspace or issue", text: $model.createDraft.plane)
+                    .textFieldStyle(.roundedBorder)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Description")
@@ -1142,6 +1188,13 @@ struct CreationFormView: View {
                 }
             }
 
+            if let message = state.message {
+                Label(message, systemImage: state.isExistingProject ? "info.circle" : "exclamationmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(state.isExistingProject ? Color.accentColor : Color.orange)
+                    .textSelection(.enabled)
+            }
+
             HStack {
                 Button {
                     model.requestCreateDraft()
@@ -1162,12 +1215,15 @@ struct CreationFormView: View {
                             Text("Creating...")
                         }
                     } else {
-                        Label("Create", systemImage: "plus")
+                        Label(
+                            state.actionTitle,
+                            systemImage: state.isExistingProject ? "arrow.right.circle" : "plus"
+                        )
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .fastHelp("Create the durable /start project from this form.")
-                .disabled(isBusy || projectName.isEmpty || model.usesFixtureFallback)
+                .fastHelp(state.message ?? "Create the durable /start project from this form.")
+                .disabled(isBusy || !state.allowsCreateAction)
             }
         }
     }
@@ -1188,6 +1244,10 @@ struct CreateDecisionSheet: View {
                     .font(.system(size: 13))
                     .textSelection(.enabled)
 
+                Text("The launcher will not overwrite it. Open the existing project to continue from its saved state.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+
                 HStack {
                     if location.hasActive {
                         Button {
@@ -1196,10 +1256,10 @@ struct CreateDecisionSheet: View {
                             model.listMode = .active
                             model.launch(projectName: prompt.draft.name)
                         } label: {
-                            Label("Launch Existing", systemImage: "play.fill")
+                            Label("Open Existing Project", systemImage: "play.fill")
                         }
                         .buttonStyle(.borderedProminent)
-                        .fastHelp("Launch the existing active project instead of creating a duplicate.")
+                        .fastHelp("Open the existing active project instead of creating a duplicate.")
                     }
 
                     if location.hasArchived && !location.hasActive {

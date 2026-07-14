@@ -288,6 +288,59 @@ final class ProgressProjectStoreTests: XCTestCase {
         XCTAssertEqual(merged.unresolvedQuestions, ["Generated question"])
     }
 
+    func testCreationFormStateExplainsMisplacedProjectName() {
+        let draft = ProjectCreationDraft(
+            name: "",
+            description: "Review service tests.",
+            initialIntent: "Inventory the slow suites.",
+            jira: "refactor_rtb_tests"
+        )
+
+        let state = draft.creationFormState(existingProject: nil)
+
+        XCTAssertEqual(state, .missingName(jiraValue: "refactor_rtb_tests"))
+        XCTAssertFalse(state.allowsCreateAction)
+        XCTAssertEqual(
+            state.message,
+            "Project Name is required. \"refactor_rtb_tests\" is currently in Jira Ticket or URL."
+        )
+    }
+
+    func testCreationFormStateReviewsExactExistingProjectBeforeRequiredDetails() {
+        let location = ExistingProjectLocation.active(URL(fileURLWithPath: "/tmp/progress__refactor_rtb_tests.md"))
+        let draft = ProjectCreationDraft(name: "refactor_rtb_tests")
+
+        let state = draft.creationFormState(existingProject: location)
+
+        XCTAssertEqual(state, .existing(name: "refactor_rtb_tests", location: location))
+        XCTAssertTrue(state.allowsCreateAction)
+        XCTAssertEqual(state.actionTitle, "Review Existing")
+        XCTAssertTrue(state.message?.contains("already exists in active progress") == true)
+    }
+
+    func testCreationFormStateRequiresValidNameDescriptionAndIntent() {
+        XCTAssertEqual(
+            ProjectCreationDraft(name: "bad name").creationFormState(existingProject: nil),
+            .invalidName("bad name")
+        )
+        XCTAssertEqual(
+            ProjectCreationDraft(name: "demo").creationFormState(existingProject: nil),
+            .missingDescription
+        )
+        XCTAssertEqual(
+            ProjectCreationDraft(name: "demo", description: "Demo").creationFormState(existingProject: nil),
+            .missingInitialIntent
+        )
+        XCTAssertEqual(
+            ProjectCreationDraft(
+                name: "demo",
+                description: "Demo",
+                initialIntent: "Start"
+            ).creationFormState(existingProject: nil),
+            .ready
+        )
+    }
+
     func testTolerantDraftDecodeStripsFencesAndText() throws {
         let data = """
         Here is the draft:

@@ -107,6 +107,32 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
         ).normalized
     }
 
+    public func creationFormState(
+        existingProject: ExistingProjectLocation?,
+        usesFixtureFallback: Bool = false
+    ) -> ProjectCreationFormState {
+        let draft = normalized
+        if usesFixtureFallback {
+            return .unavailable
+        }
+        if draft.name.isEmpty {
+            return .missingName(jiraValue: draft.jira.isEmpty ? nil : draft.jira)
+        }
+        if (try? ProgressProjectStore.validateProjectName(draft.name)) == nil {
+            return .invalidName(draft.name)
+        }
+        if let existingProject {
+            return .existing(name: draft.name, location: existingProject)
+        }
+        if draft.description.isEmpty {
+            return .missingDescription
+        }
+        if draft.initialIntent.isEmpty {
+            return .missingInitialIntent
+        }
+        return .ready
+    }
+
     public func validateForCreate(existingProject: ExistingProjectLocation?) throws {
         let draft = normalized
         try ProgressProjectStore.validateProjectName(draft.name)
@@ -184,6 +210,63 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
             }
         }
         return nil
+    }
+}
+
+public enum ProjectCreationFormState: Equatable, Sendable {
+    case unavailable
+    case missingName(jiraValue: String?)
+    case invalidName(String)
+    case existing(name: String, location: ExistingProjectLocation)
+    case missingDescription
+    case missingInitialIntent
+    case ready
+
+    public var allowsCreateAction: Bool {
+        switch self {
+        case .existing, .ready:
+            return true
+        default:
+            return false
+        }
+    }
+
+    public var actionTitle: String {
+        switch self {
+        case .existing:
+            return "Review Existing"
+        default:
+            return "Create"
+        }
+    }
+
+    public var message: String? {
+        switch self {
+        case .unavailable:
+            return "Create is unavailable while mock project data is loaded."
+        case .missingName(let jiraValue):
+            if let jiraValue {
+                return "Project Name is required. \"\(jiraValue)\" is currently in Jira Ticket or URL."
+            }
+            return "Project Name is required."
+        case .invalidName:
+            return "Project Name must start with a letter or number and use only letters, numbers, dots, underscores, or hyphens."
+        case .existing(let name, let location):
+            return "\"\(name)\" already exists in \(location.label). Review it instead of creating a duplicate."
+        case .missingDescription:
+            return "Description is required."
+        case .missingInitialIntent:
+            return "Initial Intent is required."
+        case .ready:
+            return nil
+        }
+    }
+
+    public var isExistingProject: Bool {
+        if case .existing = self {
+            return true
+        }
+        return false
     }
 }
 
