@@ -251,16 +251,33 @@ case "$cmd" in
     wrap_last_payload() {
       tail -n 1 "${CMUX_FAKE_SEND_LOG:?}" | cut -f2- | fold -w "${CMUX_FAKE_WRAP_WIDTH:-42}"
     }
+    wrap_pending_payload() {
+      wrap_last_payload | awk 'NR == 1 { print "> " $0; next } { print }'
+    }
     if [[ "$send_count" -eq 0 ]]; then
+      printf '> \n'
+    elif [[ "${CMUX_FAKE_DELAY_BRIEF_INPUT_READS:-0}" -gt 0 && "$send_count" -eq 1 && "$key_count" -ge 1 ]]; then
+      printf 'NEXT: Ask the user for the task goal and first concrete step.\n'
+      printf 'Effecting…\n'
       printf '> \n'
     elif [[ "${CMUX_FAKE_NO_GATE_B:-0}" == "1" && "$send_count" -eq 1 && "$key_count" -ge 1 ]]; then
       printf '> \n'
     elif [[ "$send_count" -eq 1 && "$key_count" -ge 1 ]]; then
       printf 'Please describe the task goal and first concrete step.\n'
       printf '> \n'
+    elif [[ "${CMUX_FAKE_DELAY_BRIEF_INPUT_READS:-0}" -gt 0 && "$send_count" -ge 2 && "$key_count" -lt 2 ]]; then
+      brief_read_count="$(cat "${CMUX_FAKE_BRIEF_READ_COUNT_FILE:?}" 2>/dev/null || printf '0')"
+      brief_read_count=$((brief_read_count + 1))
+      printf '%s\n' "$brief_read_count" >"${CMUX_FAKE_BRIEF_READ_COUNT_FILE:?}"
+      if [[ "$brief_read_count" -le "${CMUX_FAKE_DELAY_BRIEF_INPUT_READS}" ]]; then
+        printf 'NEXT: Ask the user for the task goal and first concrete step.\n'
+        printf 'Effecting…\n'
+        printf '> \n'
+      else
+        wrap_pending_payload
+      fi
     elif [[ "$send_count" -ge 2 && "$key_count" -lt 2 && "${CMUX_FAKE_WRAP_BRIEF:-0}" == "1" ]]; then
-      wrap_last_payload
-      printf '\n> \n'
+      wrap_pending_payload
     elif [[ "$send_count" -ge 2 && "$key_count" -ge 2 && "${CMUX_FAKE_ECHO_ONLY_AFTER_BRIEF:-0}" == "1" ]]; then
       wrap_last_payload
       printf '\n> \n'
@@ -359,6 +376,7 @@ export CMUX_FAKE_PROGRESS_REPO="$fake_repo"
 export CMUX_FAKE_COMMIT_PROGRESS="$fake_commit_progress"
 export CMUX_PROJECT_LAUNCHER_COMMIT_PROGRESS="$fake_commit_progress"
 export CMUX_PROJECT_LAUNCHER_PROGRESS_REPO="$fake_repo"
+export CMUX_PROJECT_LAUNCHER_CREATE_WAIT=1
 
 CMUX_PROJECT_LAUNCHER_CLAUDE="$fake_claude" \
 CMUX_PROJECT_LAUNCHER_PROGRESS_ROOT="$fake_progress" \
@@ -422,6 +440,33 @@ fi
 : >"$key_log"
 : >"$create_log"
 : >"$close_log"
+rm -f "$fake_progress/progress__display.md" "$tmp_dir/brief-read-count"
+CMUX_FAKE_DELAY_BRIEF_INPUT_READS=3 \
+CMUX_FAKE_BRIEF_READ_COUNT_FILE="$tmp_dir/brief-read-count" \
+CMUX_FAKE_WRAP_BRIEF=1 \
+CMUX_FAKE_SEND_LOG="$send_log" \
+CMUX_FAKE_KEY_LOG="$key_log" \
+CMUX_FAKE_CREATE_LOG="$create_log" \
+CMUX_FAKE_CLOSE_LOG="$close_log" \
+CMUX_FAKE_PROGRESS_ROOT="$fake_progress" \
+CMUX_FAKE_AMQ_ROOT="$tmp_dir/amq-root" \
+CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+CMUX_PROJECT_LAUNCHER_PROGRESS_ROOT="$fake_progress" \
+CMUX_PROJECT_LAUNCHER_POLL=1 \
+CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+CMUX_PROJECT_LAUNCHER_CREATE_WAIT=10 \
+  $create_bash "$repo_root/bin/cmux-project-create" --mode create --project display --brief-file "$brief_file" >"$stdout_log"
+
+grep -Fq 'Created display via /start' "$stdout_log"
+grep -Fq 'CMLREADY CMLREADY CMLREADY' "$send_log"
+[[ "$(wc -l <"$key_log" | tr -d ' ')" == "2" ]]
+[[ "$(cat "$tmp_dir/brief-read-count")" -gt 3 ]]
+
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$close_log"
 rm -f "$fake_progress/progress__display.md"
 CMUX_FAKE_AMQ_WHO_JSON='[{"name":"display","agents":[{"active":true}]}]' \
 CMUX_FAKE_EXPECT_SESSION=display-2 \
@@ -467,7 +512,12 @@ if grep -Fq 'cml-display-create' "$stdout_log"; then
 fi
 grep -Fq 'Codex boot regex:' "$stdout_log"
 grep -Fq 'Claude boot regex:' "$stdout_log"
-grep -Fq 'Gate B regex:' "$stdout_log"
+grep -Fq 'Brief input marker:' "$stdout_log"
+grep -Fq 'Create completion wait:' "$stdout_log"
+if grep -Fq 'Gate B regex:' "$stdout_log"; then
+  printf 'dry-run still exposed the removed screen-text Gate B\n' >&2
+  exit 1
+fi
 if grep -Fq 'Could not resolve AMQ base root' "$stderr_log"; then
   printf 'dry-run unexpectedly failed to resolve AMQ base root\n' >&2
   exit 1
@@ -647,7 +697,7 @@ grep -Fq 'Project creation brief' "$send_log"
 : >"$create_log"
 : >"$close_log"
 rm -f "$fake_progress/progress__display.md"
-if CMUX_FAKE_NO_GATE_B=1 \
+CMUX_FAKE_NO_GATE_B=1 \
   CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
   CMUX_FAKE_CREATE_LOG="$create_log" \
@@ -658,17 +708,11 @@ if CMUX_FAKE_NO_GATE_B=1 \
   CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
   CMUX_PROJECT_LAUNCHER_PROGRESS_ROOT="$fake_progress" \
   CMUX_PROJECT_LAUNCHER_POLL=1 \
-    $create_bash "$repo_root/bin/cmux-project-create" --mode create --project display --brief-file "$brief_file" >"$stdout_log" 2>"$stderr_log"; then
-  printf 'gate-b timeout unexpectedly succeeded\n' >&2
-  exit 1
-fi
+    $create_bash "$repo_root/bin/cmux-project-create" --mode create --project display --brief-file "$brief_file" >"$stdout_log" 2>"$stderr_log"
 
-grep -Fq 'did not reach the project detail prompt' "$stderr_log"
+grep -Fq 'Created display via /start' "$stdout_log"
 grep -Fq '/start display' "$send_log"
-if grep -Fq 'Project creation brief' "$send_log"; then
-  printf 'brief was unexpectedly sent before gate B\n' >&2
-  exit 1
-fi
+grep -Fq 'Project creation brief' "$send_log"
 
 rm -f "$draft_file" "$tmp_dir/invalid-draft.json" "$fake_progress/progress__display.md"
 if CMUX_FAKE_CLAUDE_MODE=invalid \

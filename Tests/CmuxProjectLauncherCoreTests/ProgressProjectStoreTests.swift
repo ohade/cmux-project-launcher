@@ -458,7 +458,58 @@ final class ProgressProjectStoreTests: XCTestCase {
         let written = try String(contentsOf: output, encoding: .utf8)
         XCTAssertTrue(written.contains("cmux=/tmp/cmux-bin"))
         XCTAssertTrue(written.contains("--mode create --project display --brief-file"))
+        let argsLine = try XCTUnwrap(written.split(separator: "\n").first { $0.hasPrefix("args=") })
+        let briefMarker = "--brief-file "
+        let briefRange = try XCTUnwrap(argsLine.range(of: briefMarker))
+        let briefPath = String(argsLine[briefRange.upperBound...])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: briefPath))
         XCTAssertEqual(createOutput, "Created display")
+    }
+
+    func testLauncherPreservesCreationBriefWhenCreateScriptFails() throws {
+        let root = try temporaryDirectory()
+        let script = root.appendingPathComponent("create-failure.sh")
+        let output = root.appendingPathComponent("brief-path.out")
+        try """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --brief-file)
+              printf '%s\n' "$2" > "$CMUX_PROJECT_LAUNCHER_TEST_OUTPUT"
+              shift 2
+              ;;
+            *)
+              shift
+              ;;
+          esac
+        done
+        printf 'simulated create failure\n' >&2
+        exit 1
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        setenv("CMUX_PROJECT_LAUNCHER_TEST_OUTPUT", output.path, 1)
+        addTeardownBlock {
+            unsetenv("CMUX_PROJECT_LAUNCHER_TEST_OUTPUT")
+        }
+
+        let launcher = CmuxLauncher(cmuxPath: "/tmp/cmux-bin", scriptPath: "/tmp/launch", createScriptPath: script.path)
+        XCTAssertThrowsError(try launcher.createProject(ProjectCreationDraft(
+            name: "display",
+            description: "Build display.",
+            initialIntent: "Create first slice."
+        )))
+
+        let briefPath = try String(contentsOf: output, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(atPath: briefPath)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: briefPath))
+        let brief = try String(contentsOfFile: briefPath, encoding: .utf8)
+        XCTAssertTrue(brief.contains("Build display."))
+        let attributes = try FileManager.default.attributesOfItem(atPath: briefPath)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
     func testLauncherUsesCommitProgressScript() throws {

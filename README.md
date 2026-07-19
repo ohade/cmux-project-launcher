@@ -24,7 +24,7 @@ Create-project flow:
 - Reattaches when the matching AMQ room and cmux workspace are already live.
 - Refuses mixed or ambiguous AMQ/cmux state instead of creating duplicates.
 - Creates a new project by preparing a progress scaffold and handing a reviewed
-  brief to Claude after `/start` reaches the correct prompt.
+  brief to Claude once the queued delivery marker reaches Claude's live input.
 - Archives and restores project progress files through the configured
   `commit-progress.sh`.
 - Offers temporary ad-hoc cmux workspaces that are not saved as projects.
@@ -90,6 +90,9 @@ Additional overrides:
 - `CMUX_PROJECT_LAUNCHER_ALLOW_FIXTURES=1`: allow mock data when loading fails.
 - `CMUX_PROJECT_LAUNCHER_COMMAND_TIMEOUT`: helper command timeout in seconds,
   capped at 3600.
+- `CMUX_PROJECT_LAUNCHER_CREATE_WAIT`: overall seconds allowed for the queued
+  brief to become input-ready and produce a committed progress update. Defaults
+  to 180.
 - `CMUX_PROJECT_LAUNCHER_LOG`: persistent diagnostic log path. Defaults to
   `~/Library/Logs/CmuxProjectLauncher/launcher.log`.
 

@@ -17,12 +17,13 @@ fi
 mkdir -p "$bundle_path/Contents/MacOS"
 mkdir -p "$bundle_path/Contents/Resources"
 mkdir -p "$bundle_path/Contents/Resources/bin"
+mkdir -p "$bundle_path/Contents/Resources/bin/lib"
 cp ".build/debug/$executable_name" "$bundle_path/Contents/MacOS/$executable_name"
 chmod +x "$bundle_path/Contents/MacOS/$executable_name"
 cp "$icon_path" "$bundle_path/Contents/Resources/$icon_name.icns"
 cp "$repo_root/bin/cmux-project-launch" "$bundle_path/Contents/Resources/bin/cmux-project-launch"
 cp "$repo_root/bin/cmux-project-create" "$bundle_path/Contents/Resources/bin/cmux-project-create"
-cp -R "$repo_root/bin/lib" "$bundle_path/Contents/Resources/bin/lib"
+cp -R "$repo_root/bin/lib/." "$bundle_path/Contents/Resources/bin/lib/"
 chmod +x "$bundle_path/Contents/Resources/bin/cmux-project-launch" "$bundle_path/Contents/Resources/bin/cmux-project-create"
 
 cat > "$bundle_path/Contents/Info.plist" <<'PLIST'

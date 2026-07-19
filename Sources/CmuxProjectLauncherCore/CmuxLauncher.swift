@@ -308,8 +308,7 @@ public struct CmuxLauncher: Sendable {
             throw CmuxLauncherError.scriptMissing(createScriptPath)
         }
         let briefURL = try writeCreationBrief(normalized)
-        defer { try? FileManager.default.removeItem(at: briefURL) }
-        return try run(
+        let output = try run(
             executablePath: createScriptPath,
             arguments: [
                 "--mode", "create",
@@ -320,6 +319,8 @@ public struct CmuxLauncher: Sendable {
                 "CMUX_PROJECT_LAUNCHER_CMUX": cmuxPath,
             ]
         )
+        try? FileManager.default.removeItem(at: briefURL)
+        return output
     }
 
     public func launchWorkspaceOnly(project: String) throws {

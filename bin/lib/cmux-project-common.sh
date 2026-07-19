@@ -491,10 +491,30 @@ agent_activity_marker_regex() {
 visible_input_region() {
   local surface="$1"
   local text
+  local region
   if ! text="$(read_surface_visible_text "$surface")"; then
     return 2
   fi
-  printf '%s\n' "$text" | tail -n "$input_probe_lines"
+  region="$(
+    printf '%s\n' "$text" | awk '
+      /^[[:space:]]*>[[:space:]]/ || /^[[:space:]]*❯/ {
+        found = 1
+        buffer = $0 ORS
+        next
+      }
+      found { buffer = buffer $0 ORS }
+      END {
+        if (found) {
+          printf "%s", buffer
+        }
+      }
+    '
+  )"
+  if [[ -n "$region" ]]; then
+    printf '%s\n' "$region" | tail -n "$input_probe_lines"
+  else
+    printf '%s\n' "$text" | tail -n "$input_probe_lines"
+  fi
 }
 
 prompt_visible_in_input() {
@@ -514,6 +534,13 @@ wait_for_prompt_visible() {
   local surface="$1"
   local prompt="$2"
   local deadline=$((SECONDS + submit_confirm_wait_seconds))
+  wait_for_prompt_visible_until "$surface" "$prompt" "$deadline"
+}
+
+wait_for_prompt_visible_until() {
+  local surface="$1"
+  local prompt="$2"
+  local deadline="$3"
   local status
   while true; do
     status=0
@@ -560,13 +587,14 @@ confirm_or_retry_enter() {
   local surface="$1"
   local agent="$2"
   local prompt="$3"
+  local visible_probe="${4:-$prompt}"
   local attempt
   local deadline
   for ((attempt = 1; attempt <= enter_retries; attempt++)); do
     "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" enter >/dev/null
     deadline=$((SECONDS + submit_confirm_wait_seconds))
     while true; do
-      if prompt_submitted "$surface" "$agent" "$prompt"; then
+      if prompt_submitted "$surface" "$agent" "$visible_probe"; then
         return 0
       fi
       (( SECONDS >= deadline )) && break
@@ -586,5 +614,19 @@ submit_prompt() {
     return 1
   fi
   sleep "$enter_delay_seconds"
-  confirm_or_retry_enter "$surface" "$agent" "$prompt"
+  confirm_or_retry_enter "$surface" "$agent" "$prompt" "$visible_probe"
+}
+
+submit_prompt_when_input_ready() {
+  local surface="$1"
+  local prompt="$2"
+  local agent="$3"
+  local visible_probe="$4"
+  local deadline="$5"
+  "$cmux_bin" send --workspace "$workspace_ref" --surface "$surface" "$prompt" >/dev/null
+  if ! wait_for_prompt_visible_until "$surface" "$visible_probe" "$deadline"; then
+    return 1
+  fi
+  sleep "$enter_delay_seconds"
+  confirm_or_retry_enter "$surface" "$agent" "$prompt" "$visible_probe"
 }
