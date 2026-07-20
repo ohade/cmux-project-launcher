@@ -173,6 +173,9 @@ case "$cmd" in
         [[ "$name" == "$expected_session" ]]
         [[ "$layout" == *"coopcodex $expected_session"* ]]
         [[ "$layout" == *"coopcc $expected_session"* ]]
+        # Claude is named at boot via `--name claude-<session>`; Codex is not.
+        [[ "$layout" == *"coopcc $expected_session -- --name claude-$expected_session"* ]]
+        [[ "$layout" != *"coopcodex $expected_session --name"* ]]
         printf '%s\t%s\n' "$name" "$layout" >>"${CMUX_FAKE_CREATE_LOG:?}"
         printf 'OK workspace:42\n'
         ;;
@@ -238,14 +241,33 @@ case "$cmd" in
     if [[ "$surface" == "surface:26" ]]; then
       printf 'OpenAI Codex\n'
       printf 'gpt-5.4 100%% left\n'
+      # Emulate Codex's actual /rename state machine. Per-surface counts keep the
+      # Claude brief choreography below unaffected by these Codex sends.
+      codex_send="$(awk -F '\t' -v s="$surface" '$1 == s { c++ } END { print c + 0 }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || printf '0')"
+      codex_key="$(awk -F '\t' -v s="$surface" '$1 == s { c++ } END { print c + 0 }' "${CMUX_FAKE_KEY_LOG:?}" 2>/dev/null || printf '0')"
+      codex_payload="$(awk -F '\t' -v s="$surface" '$1 == s { v = $2 } END { print v }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || true)"
+      codex_name="$(awk -F '\t' -v s="$surface" '$1 == s { c++; if (c == 2) print $2 }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || true)"
+      if [[ "$codex_send" -eq 0 ]]; then
+        printf '> \n'
+      elif [[ "$codex_send" -eq 1 && "$codex_key" -eq 0 ]]; then
+        printf '> /rename\n'
+      elif [[ "$codex_send" -eq 1 ]]; then
+        printf 'Rename thread\nType a name and press Enter\n> \n'
+      elif [[ "$codex_send" -eq 2 && "$codex_key" -eq 1 ]]; then
+        printf 'Rename thread\nType a name and press Enter\n> %s\n' "$codex_name"
+      else
+        printf 'Session renamed to %s. To resume this session run codex resume %s\n> \n' "$codex_name" "$codex_name"
+      fi
       exit 0
     fi
     if [[ "${CMUX_FAKE_READ_FAIL_AFTER_START:-0}" == "1" && -f "${CMUX_FAKE_FAIL_AFTER_START_MARKER:?}" ]]; then
       printf 'read failed\n' >&2
       exit 70
     fi
-    send_count="$(wc -l <"${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null | tr -d ' ' || printf '0')"
-    key_count="$(wc -l <"${CMUX_FAKE_KEY_LOG:?}" 2>/dev/null | tr -d ' ' || printf '0')"
+    # Per-surface counts: the Claude choreography must see only Claude's own
+    # sends/Enters, so the Codex /rename cycle does not shift its gate logic.
+    send_count="$(awk -F '\t' -v s="$surface" '$1 == s { c++ } END { print c + 0 }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || printf '0')"
+    key_count="$(awk -F '\t' -v s="$surface" '$1 == s { c++ } END { print c + 0 }' "${CMUX_FAKE_KEY_LOG:?}" 2>/dev/null || printf '0')"
     printf 'Welcome to Claude Code\n'
     printf 'Opus 4.8 bypass permissions\n'
     wrap_last_payload() {
@@ -415,8 +437,13 @@ CMUX_PROJECT_LAUNCHER_POLL=1 \
 grep -Fq 'Created display via /start' "$stdout_log"
 grep -Fq '/start display' "$send_log"
 grep -Fq 'Project creation brief' "$send_log"
-[[ "$(awk -F '\t' 'NR == 1 { print $2 }' "$send_log")" == "/start display" ]]
-[[ "$(awk -F '\t' 'NR == 2 { print $2 }' "$send_log")" == Project\ creation\ brief* ]]
+# The first Claude-surface send is /start (the Codex /rename sends come first, on surface:26).
+[[ "$(awk -F '\t' '$1 == "surface:27" { print $2; exit }' "$send_log")" == "/start display" ]]
+# Codex is renamed post-boot before Claude's /start.
+grep -Fq $'surface:26\t/rename' "$send_log"
+grep -Fq $'surface:26\tcodex-display' "$send_log"
+# The second Claude-surface send is the brief (right after /start); Codex sends are on surface:26.
+[[ "$(awk -F '\t' '$1 == "surface:27" { c++ } c == 2 { print $2; exit }' "$send_log")" == Project\ creation\ brief* ]]
 # shellcheck disable=SC2016
 if grep -Fq '$start display' "$send_log"; then
   printf 'Codex start prompt was unexpectedly sent during create mode\n' >&2
@@ -460,7 +487,8 @@ CMUX_PROJECT_LAUNCHER_CREATE_WAIT=10 \
 
 grep -Fq 'Created display via /start' "$stdout_log"
 grep -Fq 'CMLREADY CMLREADY CMLREADY' "$send_log"
-[[ "$(wc -l <"$key_log" | tr -d ' ')" == "2" ]]
+# Claude submitted exactly twice (/start + brief); Codex Enter keys are on surface:26.
+[[ "$(awk -F '\t' '$1 == "surface:27"' "$key_log" | wc -l | tr -d ' ')" == "2" ]]
 [[ "$(cat "$tmp_dir/brief-read-count")" -gt 3 ]]
 
 : >"$send_log"

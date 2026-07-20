@@ -365,29 +365,31 @@ final class ProgressProjectStoreTests: XCTestCase {
         XCTAssertEqual(draft.unresolvedQuestions, ["Which repo?"])
     }
 
-    func testLaunchPlanContainsTwoAgentCommands() throws {
-        let plan = try CmuxLaunchPlan(project: "demo-project")
+    func testLauncherRoutesAdHocThroughScriptWithNoStart() throws {
+        // Ad-hoc launches go through cmux-project-launch --no-start so the scratch
+        // workspace gets the same session renaming as a project launch (Claude via
+        // `--name` at boot, Codex via post-boot `/rename`) without sending /start.
+        let root = try temporaryDirectory()
+        let script = root.appendingPathComponent("launch.sh")
+        let output = root.appendingPathComponent("adhoc.out")
+        try """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s|%s\\n' "$CMUX_PROJECT_LAUNCHER_CMUX" "$*" > "$CMUX_PROJECT_LAUNCHER_TEST_OUTPUT"
+        printf 'Launched ad-hoc workspace adhoc-demo in workspace:7 (Claude name requested at boot; Codex rename confirmed; no /start sent)\\n'
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        setenv("CMUX_PROJECT_LAUNCHER_TEST_OUTPUT", output.path, 1)
+        addTeardownBlock {
+            unsetenv("CMUX_PROJECT_LAUNCHER_TEST_OUTPUT")
+        }
 
-        XCTAssertEqual(plan.amqSession, "demo-project")
-        XCTAssertTrue(plan.layoutJSON.contains("coopcodex"))
-        XCTAssertTrue(plan.layoutJSON.contains("coopcc"))
-        XCTAssertTrue(plan.layoutJSON.contains("demo-project"))
-        XCTAssertTrue(plan.layoutJSON.contains("zsh -ic"))
-        XCTAssertFalse(plan.layoutJSON.contains("amq coop exec"))
-        XCTAssertFalse(plan.layoutJSON.contains("--no-wake"))
-        XCTAssertEqual(plan.codexStartPrompt, "$start demo-project")
-        XCTAssertEqual(plan.claudeStartPrompt, "/start demo-project")
-    }
+        let launcher = CmuxLauncher(cmuxPath: "/tmp/cmux-bin", scriptPath: script.path)
+        let launchOutput = try launcher.launchAdHoc(name: "adhoc-demo")
 
-    func testLaunchPlanCanUseDistinctAmqSession() throws {
-        let plan = try CmuxLaunchPlan(project: "demo-project", amqSession: "demo-project-2")
-
-        XCTAssertEqual(plan.amqSession, "demo-project-2")
-        XCTAssertTrue(plan.layoutJSON.contains("coopcodex"))
-        XCTAssertTrue(plan.layoutJSON.contains("coopcc"))
-        XCTAssertTrue(plan.layoutJSON.contains("demo-project-2"))
-        XCTAssertEqual(plan.codexStartPrompt, "$start demo-project")
-        XCTAssertEqual(plan.claudeStartPrompt, "/start demo-project")
+        let written = try String(contentsOf: output, encoding: .utf8)
+        XCTAssertEqual(written, "/tmp/cmux-bin|--no-start adhoc-demo\n")
+        XCTAssertTrue(launchOutput.contains("workspace:7"))
     }
 
     func testLauncherUsesScriptForFullLaunch() throws {
@@ -541,37 +543,47 @@ final class ProgressProjectStoreTests: XCTestCase {
     }
 
     func testLauncherLaunchesAndClosesAdHocWorkspace() throws {
+        // Ad-hoc launch routes through cmux-project-launch --no-start (which prints the
+        // created workspace ref); the ref is then parsed back out and closed via cmux.
         let root = try temporaryDirectory()
         let cmux = root.appendingPathComponent("cmux")
+        let script = root.appendingPathComponent("launch.sh")
         let output = root.appendingPathComponent("cmux.out")
         try """
         #!/usr/bin/env bash
         set -euo pipefail
-        printf '%s\\n' "$*" >> "$CMUX_PROJECT_LAUNCHER_TEST_OUTPUT"
-        if [[ "$1" == "new-workspace" ]]; then
-          printf 'OK workspace:99\\n'
-        else
-          printf 'OK %s\\n' "${@: -1}"
-        fi
+        printf 'cmux %s\\n' "$*" >> "$CMUX_PROJECT_LAUNCHER_TEST_OUTPUT"
+        printf 'OK %s\\n' "${@: -1}"
         """.write(to: cmux, atomically: true, encoding: .utf8)
+        try """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf 'launch %s\\n' "$*" >> "$CMUX_PROJECT_LAUNCHER_TEST_OUTPUT"
+        printf 'Launched ad-hoc workspace adhoc-zesty-kazoo-123 in workspace:99 (Claude name requested at boot; Codex rename confirmed; no /start sent)\\n'
+        """.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cmux.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
         setenv("CMUX_PROJECT_LAUNCHER_TEST_OUTPUT", output.path, 1)
         addTeardownBlock {
             unsetenv("CMUX_PROJECT_LAUNCHER_TEST_OUTPUT")
         }
 
-        let launcher = CmuxLauncher(cmuxPath: cmux.path, scriptPath: "/tmp/launch", createScriptPath: "/tmp/create")
+        let launcher = CmuxLauncher(cmuxPath: cmux.path, scriptPath: script.path, createScriptPath: "/tmp/create")
         let launchOutput = try launcher.launchAdHoc(name: "adhoc-zesty-kazoo-123")
-        let closeOutput = try launcher.closeWorkspace("workspace:99")
+        let workspaceRef = try XCTUnwrap(
+            launchOutput
+                .split(whereSeparator: { $0.isWhitespace })
+                .first { $0.hasPrefix("workspace:") }
+                .map(String.init)
+        )
+        let closeOutput = try launcher.closeWorkspace(workspaceRef)
         let written = try String(contentsOf: output, encoding: .utf8)
 
-        XCTAssertEqual(launchOutput, "OK workspace:99")
+        XCTAssertTrue(launchOutput.contains("workspace:99"))
+        XCTAssertEqual(workspaceRef, "workspace:99")
         XCTAssertEqual(closeOutput, "OK workspace:99")
-        XCTAssertTrue(written.contains("new-workspace --name adhoc-zesty-kazoo-123"))
-        XCTAssertTrue(written.contains("workspace close workspace:99"))
-        XCTAssertTrue(written.contains("coopcodex"))
-        XCTAssertTrue(written.contains("coopcc"))
-        XCTAssertTrue(written.contains("adhoc-zesty-kazoo-123"))
+        XCTAssertTrue(written.contains("launch --no-start adhoc-zesty-kazoo-123"))
+        XCTAssertTrue(written.contains("cmux workspace close workspace:99"))
     }
 
     func testCloseWorkspaceTreatsAlreadyGoneAsSuccess() throws {

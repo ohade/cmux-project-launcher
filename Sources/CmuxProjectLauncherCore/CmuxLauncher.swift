@@ -55,103 +55,6 @@ public enum LauncherDiagnostics {
     }
 }
 
-public enum CmuxLaunchPlanError: Error, LocalizedError, Equatable {
-    case invalidLauncherCommand(String, String)
-
-    public var errorDescription: String? {
-        switch self {
-        case .invalidLauncherCommand(let label, let value):
-            return "\(label) must be a shell function name or executable path without spaces: \(value)"
-        }
-    }
-}
-
-public struct CmuxLaunchPlan: Equatable, Sendable {
-    public let project: String
-    public let amqSession: String
-    public let layoutJSON: String
-    public let codexStartPrompt: String
-    public let claudeStartPrompt: String
-
-    public init(project: String, amqSession: String? = nil) throws {
-        try ProgressProjectStore.validateProjectName(project)
-        if let amqSession {
-            try ProgressProjectStore.validateProjectName(amqSession)
-        }
-        self.project = project
-        self.amqSession = amqSession ?? project
-        self.codexStartPrompt = "$start \(project)"
-        self.claudeStartPrompt = "/start \(project)"
-        self.layoutJSON = try Self.makeLayoutJSON(amqSession: self.amqSession)
-    }
-
-    static func makeLayoutJSON(amqSession: String) throws -> String {
-        let layout: [String: Any] = [
-            "direction": "horizontal",
-            "split": 0.5,
-            "children": [
-                [
-                    "pane": [
-                        "surfaces": [
-                            [
-                                "type": "terminal",
-                                "name": "Codex",
-                                "command": try Self.codexCommand(amqSession: amqSession),
-                                "focus": true,
-                            ],
-                        ],
-                    ],
-                ],
-                [
-                    "pane": [
-                        "surfaces": [
-                            [
-                                "type": "terminal",
-                                "name": "Claude",
-                                "command": try Self.claudeCommand(amqSession: amqSession),
-                            ],
-                        ],
-                    ],
-                ],
-            ],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: layout, options: [.sortedKeys])
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    static func codexCommand(amqSession: String) throws -> String {
-        // coopcodex is a zsh function in ~/.zshrc, so load it through an interactive shell.
-        try agentCommand(
-            launcher: LauncherRuntimeDefaults.launcherWord(
-                env: "CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER",
-                fallback: "coopcodex"
-            ),
-            label: "CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER",
-            amqSession: amqSession
-        )
-    }
-
-    static func claudeCommand(amqSession: String) throws -> String {
-        // coopcc is a zsh function in ~/.zshrc, so load it through an interactive shell.
-        try agentCommand(
-            launcher: LauncherRuntimeDefaults.launcherWord(
-                env: "CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER",
-                fallback: "coopcc"
-            ),
-            label: "CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER",
-            amqSession: amqSession
-        )
-    }
-
-    private static func agentCommand(launcher: String, label: String, amqSession: String) throws -> String {
-        guard LauncherRuntimeDefaults.isSafeLauncherWord(launcher) else {
-            throw CmuxLaunchPlanError.invalidLauncherCommand(label, launcher)
-        }
-        let invocation = "\(LauncherRuntimeDefaults.shellQuote(launcher)) \(LauncherRuntimeDefaults.shellQuote(amqSession))"
-        return "cd \(LauncherRuntimeDefaults.shellQuote(LauncherRuntimeDefaults.workspaceRoot())) && zsh -ic \(LauncherRuntimeDefaults.shellQuote(invocation))"
-    }
-}
-
 enum LauncherRuntimeDefaults {
     static func expandedPath(_ value: String) -> String {
         NSString(string: value).expandingTildeInPath
@@ -165,20 +68,6 @@ enum LauncherRuntimeDefaults {
         return expandedPath(value)
     }
 
-    static func workspaceRoot() -> String {
-        environmentPath("CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT")
-            ?? expandedPath("~/git")
-    }
-
-    static func launcherWord(env: String, fallback: String) -> String {
-        let value = ProcessInfo.processInfo.environment[env]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let value, !value.isEmpty {
-            return value
-        }
-        return fallback
-    }
-
     static func bundledScript(named name: String) -> String? {
         let candidates = [
             Bundle.main.resourceURL?.appendingPathComponent("bin/\(name)"),
@@ -186,15 +75,6 @@ enum LauncherRuntimeDefaults {
                 .appendingPathComponent("bin/\(name)"),
         ].compactMap(\.self)
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }?.path
-    }
-
-    static func isSafeLauncherWord(_ value: String) -> Bool {
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-")
-        return !value.isEmpty && value.unicodeScalars.allSatisfy { allowed.contains($0) }
-    }
-
-    static func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
@@ -323,27 +203,22 @@ public struct CmuxLauncher: Sendable {
         return output
     }
 
-    public func launchWorkspaceOnly(project: String) throws {
-        let plan = try CmuxLaunchPlan(project: project)
-        _ = try run(arguments: [
-            "new-workspace",
-            "--name", project,
-            "--description", "Project launcher: \(project)",
-            "--layout", plan.layoutJSON,
-            "--focus", "true",
-        ])
-    }
-
     @discardableResult
     public func launchAdHoc(name: String) throws -> String {
-        let plan = try CmuxLaunchPlan(project: name)
-        let output = try run(arguments: [
-            "new-workspace",
-            "--name", name,
-            "--description", "Ad-hoc scratch workspace: \(name)",
-            "--layout", plan.layoutJSON,
-            "--focus", "true",
-        ])
+        try ProgressProjectStore.validateProjectName(name)
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            throw CmuxLauncherError.scriptMissing(scriptPath)
+        }
+        // Route ad-hoc through the launch script in --no-start mode so the scratch
+        // workspace gets the same session renaming (Claude via `--name` at boot, Codex
+        // via post-boot `/rename`) as a project launch, without sending /start.
+        let output = try run(
+            executablePath: scriptPath,
+            arguments: ["--no-start", name],
+            environment: [
+                "CMUX_PROJECT_LAUNCHER_CMUX": cmuxPath,
+            ]
+        )
         return output.isEmpty ? "Launched ad-hoc workspace \(name)" : output
     }
 

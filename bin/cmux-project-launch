@@ -3,11 +3,18 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: cmux-project-launch <project>
+Usage: cmux-project-launch [--no-start] <project>
 
-Creates a cmux workspace with Codex and Claude panes, then sends:
+Creates a cmux workspace with Codex and Claude panes, names each agent session
+after the project (Claude via `claude --name claude-<project>` at boot, Codex via
+a post-boot `/rename codex-<project>`), then sends:
   Codex: $start <project>
   Claude: /start <project>
+
+With --no-start (used for ad-hoc scratch workspaces), the workspace is created and
+the sessions are renamed, but neither /start is sent. In that mode the workspace is
+the deliverable: readiness and rename are best-effort and never discard the
+workspace on failure.
 
 Environment:
   CMUX_PROJECT_LAUNCHER_CMUX     cmux CLI path
@@ -44,12 +51,43 @@ Environment:
 USAGE
 }
 
-if [[ $# -ne 1 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+no_start=0
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    --no-start)
+      no_start=1
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        positional+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      positional+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ "${#positional[@]}" -ne 1 ]]; then
   usage
   exit 2
 fi
 
-project="$1"
+project="${positional[0]}"
 if [[ ! "$project" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
   echo "Invalid project name: $project" >&2
   exit 2
@@ -115,10 +153,85 @@ if [[ ! -x "$cmux_bin" ]]; then
   exit 1
 fi
 
+existing_agent_health_reason=""
+existing_workspace_agents_ready() {
+  local target_workspace_ref="$1"
+  local pane_rows
+  local pane_surface_rows
+  local pane_ref
+  local surface_rows
+  local screen
+  local row
+  local -a pane_refs
+  local -a all_surface_rows
+  local -a codex_refs
+  local -a claude_refs
+  pane_refs=()
+  all_surface_rows=()
+  codex_refs=()
+  claude_refs=()
+
+  if ! pane_rows="$("$cmux_bin" list-panes --workspace "$target_workspace_ref" 2>/dev/null)"; then
+    existing_agent_health_reason="its panes could not be inspected"
+    return 2
+  fi
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && pane_refs+=("$row")
+  done < <(printf '%s\n' "$pane_rows" | extract_cmux_refs pane)
+  if [[ "${#pane_refs[@]}" -eq 0 ]]; then
+    existing_agent_health_reason="it has no inspectable panes"
+    return 2
+  fi
+  for pane_ref in "${pane_refs[@]}"; do
+    if ! pane_surface_rows="$("$cmux_bin" list-pane-surfaces --workspace "$target_workspace_ref" --pane "$pane_ref" 2>/dev/null)"; then
+      existing_agent_health_reason="its agent surfaces could not be inspected"
+      return 2
+    fi
+    while IFS= read -r row || [[ -n "$row" ]]; do
+      [[ -n "$row" ]] && all_surface_rows+=("$row")
+    done <<<"$pane_surface_rows"
+  done
+  if [[ "${#all_surface_rows[@]}" -eq 0 ]]; then
+    existing_agent_health_reason="its agent surfaces could not be inspected"
+    return 2
+  fi
+  surface_rows="$(printf '%s\n' "${all_surface_rows[@]}")"
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && codex_refs+=("$row")
+  done < <(printf '%s\n' "$surface_rows" | surface_refs_for_name "Codex")
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && claude_refs+=("$row")
+  done < <(printf '%s\n' "$surface_rows" | surface_refs_for_name "Claude")
+  if [[ "${#codex_refs[@]}" -ne 1 || "${#claude_refs[@]}" -ne 1 ]]; then
+    existing_agent_health_reason="it does not contain exactly one Codex surface and one Claude surface"
+    return 1
+  fi
+  if ! surface_has_live_runtime "${codex_refs[0]}"; then
+    existing_agent_health_reason="its Codex surface has no live terminal runtime"
+    return 1
+  fi
+  if ! surface_has_live_runtime "${claude_refs[0]}"; then
+    existing_agent_health_reason="its Claude surface has no live terminal runtime"
+    return 1
+  fi
+  if ! screen="$("$cmux_bin" read-screen --workspace "$target_workspace_ref" --surface "${codex_refs[0]}" --lines 80 2>/dev/null)" \
+    || ! grep -Eiq "$codex_ready_regex" <<<"$screen"; then
+    existing_agent_health_reason="its Codex surface is live but does not show a Codex session"
+    return 1
+  fi
+  if ! screen="$("$cmux_bin" read-screen --workspace "$target_workspace_ref" --surface "${claude_refs[0]}" --lines 80 2>/dev/null)" \
+    || ! grep -Eiq "$claude_ready_regex" <<<"$screen"; then
+    existing_agent_health_reason="its Claude surface is live but does not show a Claude session"
+    return 1
+  fi
+  return 0
+}
+
 handle_existing_workspace_state() {
   local existing_workspace_ref
   local workspace_lookup_status=0
   local runtime_status=0
+  local agent_health_status=0
   local project_session_active=0
   if session_in_use "$project"; then
     project_session_active=1
@@ -152,6 +265,15 @@ handle_existing_workspace_state() {
         exit 1
         ;;
     esac
+    agent_health_status=0
+    existing_workspace_agents_ready "$existing_workspace_ref" || agent_health_status=$?
+    if [[ "$agent_health_status" -ne 0 ]]; then
+      if [[ "$dry_run" != "1" && "$dry_run" != "true" ]]; then
+        select_existing_workspace "$existing_workspace_ref" >/dev/null 2>&1 || true
+      fi
+      echo "AMQ session $project is active and cmux workspace $existing_workspace_ref exists, but $existing_agent_health_reason. Refusing to report a successful reattach or spawn a parallel room." >&2
+      exit 1
+    fi
     if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
       printf 'cmux workspace select %q\n' "$existing_workspace_ref"
       printf 'would reattach %q in %q using AMQ session %q\n' "$project" "$existing_workspace_ref" "$project"
@@ -249,8 +371,14 @@ import sys
 
 project, amq_session, workspace_root, codex_launcher, claude_launcher = sys.argv[1:6]
 # coopcodex/coopcc are zsh functions in ~/.zshrc, so load them through zsh -ic.
-codex_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(shlex.quote(codex_launcher) + ' ' + shlex.quote(amq_session))}"
-claude_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(shlex.quote(claude_launcher) + ' ' + shlex.quote(amq_session))}"
+# Claude gets `--name claude-<session>` at boot. The explicit `--` follows the
+# portable coopcc grammar and forwards the remaining args to `claude`, so the
+# conversation is named before /start and the name survives /clear. Codex has no
+# equivalent boot flag; it is renamed post-boot.
+codex_inner = shlex.quote(codex_launcher) + ' ' + shlex.quote(amq_session)
+claude_inner = shlex.quote(claude_launcher) + ' ' + shlex.quote(amq_session) + ' -- --name ' + shlex.quote(f"claude-{amq_session}")
+codex_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(codex_inner)}"
+claude_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(claude_inner)}"
 layout = {
     "direction": "horizontal",
     "split": 0.5,
@@ -267,8 +395,14 @@ if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
   printf 'cmux workspace create --name %q --description %q --layout %q --focus true\n' \
     "$amq_session" "Project launcher: $project (AMQ session: $amq_session)" "$layout"
   printf 'allocated AMQ session: %q\n' "$amq_session"
-  printf 'post-boot Codex send: %q + sleep %q + send-key enter, retry up to %q\n' "\$start $project" "$enter_delay_seconds" "$enter_retries"
-  printf 'post-boot Claude send: %q + sleep %q + send-key enter, retry up to %q\n' "/start $project" "$enter_delay_seconds" "$enter_retries"
+  printf 'Claude session name (boot --name): %q\n' "claude-$amq_session"
+  printf 'post-boot Codex rename: %q then %q + send-key enter\n' "/rename" "codex-$amq_session"
+  if [[ "$no_start" -eq 1 ]]; then
+    printf 'no-start mode: workspace + rename only, no start commands sent\n'
+  else
+    printf 'post-boot Codex send: %q + sleep %q + send-key enter, retry up to %q\n' "\$start $project" "$enter_delay_seconds" "$enter_retries"
+    printf 'post-boot Claude send: %q + sleep %q + send-key enter, retry up to %q\n' "/start $project" "$enter_delay_seconds" "$enter_retries"
+  fi
   exit 0
 fi
 
@@ -373,28 +507,65 @@ ensure_surface_runtime() {
   wait_for_surface_runtime "$surface"
 }
 
-if ! ensure_surface_runtime "$codex_surface"; then
-  agent_readiness_error "Codex surface $codex_surface did not obtain a live terminal runtime."
-  exit 1
-fi
-if ! ensure_surface_runtime "$claude_surface"; then
-  agent_readiness_error "Claude surface $claude_surface did not obtain a live terminal runtime."
-  exit 1
+wait_agent_ready() {
+  # 0 = the surface has a live runtime AND shows the agent's boot banner; 1 = not ready.
+  local surface="$1"
+  local ready_regex="$2"
+  ensure_surface_runtime "$surface" || return 1
+  if wait_for_surface_text "$surface" "$ready_regex"; then
+    return 0
+  fi
+  sleep "$wait_seconds"
+  wait_for_surface_text "$surface" "$ready_regex"
+}
+
+# In --no-start (ad-hoc) mode the scratch workspace is the deliverable, so once its
+# surfaces resolve we keep it regardless of any later readiness/rename outcome.
+if [[ "$no_start" -eq 1 ]]; then
+  launch_ok=1
 fi
 
-if ! wait_for_surface_text "$codex_surface" "$codex_ready_regex"; then
-  sleep "$wait_seconds"
-  if ! wait_for_surface_text "$codex_surface" "$codex_ready_regex"; then
-    agent_readiness_error "Codex surface $codex_surface did not show a recognized Codex banner."
+codex_ready=0
+claude_ready=0
+if wait_agent_ready "$codex_surface" "$codex_ready_regex"; then codex_ready=1; fi
+if wait_agent_ready "$claude_surface" "$claude_ready_regex"; then claude_ready=1; fi
+
+if [[ "$no_start" -ne 1 ]]; then
+  if [[ "$codex_ready" -ne 1 ]]; then
+    agent_readiness_error "Codex surface $codex_surface did not obtain a live runtime or show a recognized Codex banner."
+    exit 1
+  fi
+  if [[ "$claude_ready" -ne 1 ]]; then
+    agent_readiness_error "Claude surface $claude_surface did not obtain a live runtime or show a recognized Claude banner."
     exit 1
   fi
 fi
-if ! wait_for_surface_text "$claude_surface" "$claude_ready_regex"; then
-  sleep "$wait_seconds"
-  if ! wait_for_surface_text "$claude_surface" "$claude_ready_regex"; then
-    agent_readiness_error "Claude surface $claude_surface did not show a recognized Claude banner."
+
+# Name the Codex thread post-boot. Claude was named at boot via
+# `claude --name claude-<session>` in the layout, so it needs no post-boot rename.
+codex_renamed=0
+if [[ "$codex_ready" -eq 1 ]]; then
+  if rename_thread "$codex_surface" "codex-$amq_session" codex; then
+    codex_renamed=1
+  elif [[ "$no_start" -ne 1 ]]; then
+    launch_ok=1
+    echo "Workspace $workspace_ref is live, but Codex did not confirm the name codex-$amq_session. No start prompts were sent." >&2
     exit 1
+  else
+    echo "Could not confirm the Codex thread was renamed to codex-$amq_session; preserving the ad-hoc workspace." >&2
   fi
+else
+  echo "Skipping Codex rename because its surface did not become ready." >&2
+fi
+
+if [[ "$no_start" -eq 1 ]]; then
+  launch_ok=1
+  if [[ "$codex_renamed" -eq 1 && "$claude_ready" -eq 1 ]]; then
+    echo "Launched ad-hoc workspace $amq_session in $workspace_ref (Claude name requested at boot; Codex rename confirmed; no /start sent)"
+  else
+    echo "Launched ad-hoc workspace $amq_session in $workspace_ref (session naming incomplete; no /start sent)"
+  fi
+  exit 0
 fi
 
 if ! submit_prompt "$codex_surface" "\$start $project" codex; then

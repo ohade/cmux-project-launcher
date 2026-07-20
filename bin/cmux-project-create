@@ -513,8 +513,13 @@ import sys
 
 session, workspace_root, codex_launcher, claude_launcher = sys.argv[1:5]
 # coopcodex/coopcc are zsh functions in ~/.zshrc, so load them through zsh -ic.
-codex_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(shlex.quote(codex_launcher) + ' ' + shlex.quote(session))}"
-claude_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(shlex.quote(claude_launcher) + ' ' + shlex.quote(session))}"
+# Claude gets `--name claude-<session>` at boot. The explicit `--` follows the
+# portable coopcc grammar and forwards trailing args to `claude`, naming the
+# conversation before /start and surviving /clear. Codex is renamed post-boot.
+codex_inner = shlex.quote(codex_launcher) + ' ' + shlex.quote(session)
+claude_inner = shlex.quote(claude_launcher) + ' ' + shlex.quote(session) + ' -- --name ' + shlex.quote(f"claude-{session}")
+codex_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(codex_inner)}"
+claude_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(claude_inner)}"
 layout = {
     "direction": "horizontal",
     "split": 0.5,
@@ -606,6 +611,15 @@ PY
   fi
   if ! wait_for_surface_text "$claude_surface" "$claude_ready_regex"; then
     helper_readiness_error
+    exit 1
+  fi
+
+  # Name the Codex thread post-boot. Claude was named at boot via
+  # `claude --name claude-<session>` in the layout, so it needs no post-boot rename.
+  if ! rename_thread "$codex_surface" "codex-$amq_session" codex; then
+    launch_ok=1
+    echo "Workspace $workspace_ref is live, but Codex did not confirm the name codex-$amq_session. /start and the creation brief were not sent." >&2
+    create_failed_context
     exit 1
   fi
 

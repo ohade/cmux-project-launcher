@@ -21,7 +21,10 @@ Create-project flow:
 - Lists active and archived projects from progress files.
 - Shows resume/history context from the project metadata and task-state file.
 - Launches a project workspace with Codex and Claude panes.
-- Reattaches when the matching AMQ room and cmux workspace are already live.
+- Names the underlying Claude conversation `claude-<session>` at boot and
+  confirms Codex's `codex-<session>` rename before sending either start prompt.
+- Reattaches only when the matching AMQ room and both live agent sessions are
+  present; a restored plain shell is reported as degraded.
 - Refuses mixed or ambiguous AMQ/cmux state instead of creating duplicates.
 - Creates a new project by preparing a progress scaffold and handing a reviewed
   brief to Claude once the queued delivery marker reaches Claude's live input.
@@ -32,14 +35,20 @@ Create-project flow:
 ## Requirements
 
 - macOS with Swift 6.
-- cmux app installed, with the cmux CLI available at
+- cmux 0.64.20 or newer installed, with the cmux CLI available at
   `/Applications/cmux.app/Contents/Resources/bin/cmux` or via
-  `CMUX_PROJECT_LAUNCHER_CMUX`.
+  `CMUX_PROJECT_LAUNCHER_CMUX`. Version 0.64.20 contains the upstream Codex
+  YOLO/danger-mode restore fixes required by these workspaces.
 - AMQ CLI installed. The launcher prefers explicit paths and common install
   locations before falling back to `PATH`.
 - Local shell launchers for agents:
   - `coopcodex <session>` for Codex.
-  - `coopcc <session>` for Claude.
+  - `coopcc <session> -- <agent-arguments>` for Claude. Inside cmux it must
+    execute the per-surface `CMUX_CLAUDE_WRAPPER_SHIM`, not a bare Claude
+    binary, so cmux can record a resumable Claude session.
+  - Any Claude SessionStart hook that emits `sessionTitle` must preserve an
+    explicit `--name` from the cmux launch metadata; otherwise it will replace
+    the launcher's `claude-<session>` name immediately after boot.
 - Optional: Claude CLI for the "Ask Claude" draft helper.
 - Optional: `/start` progress tooling, including `start-precompute` and
   `commit-progress.sh`, if you want project catalog and create/archive support.
@@ -144,6 +153,8 @@ bin/cmux-project-create --mode create \
   probe, target mismatch, or ownership race preserves the old room and falls
   back to a suffixed session.
 - Prompts are sent only after live terminal runtime and agent readiness checks.
+- Codex `/rename` must open its naming dialog and emit the matching
+  `Session renamed to` confirmation before project/create prompts are sent.
 - Prompt submission is confirmed through current visible cmux output; read
   failures are treated as failures, not success.
 - Create success requires both a progress-file content change and a new local

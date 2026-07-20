@@ -61,6 +61,10 @@ case "$cmd" in
         expected_session="${CMUX_FAKE_EXPECT_SESSION:-demo-project}"
         [[ "$layout" == *"coopcodex $expected_session"* ]]
         [[ "$layout" == *"coopcc $expected_session"* ]]
+        # Claude is named at boot via `--name claude-<session>` forwarded through coopcc.
+        [[ "$layout" == *"coopcc $expected_session -- --name claude-$expected_session"* ]]
+        # Codex has no boot flag, so its command must NOT carry a --name.
+        [[ "$layout" != *"coopcodex $expected_session --name"* ]]
         [[ "$layout" != *"amq coop exec"* ]]
         [[ "$layout" != *"--no-wake"* ]]
         printf '%s\n' "$expected_session" >>"${CMUX_FAKE_CREATE_LOG:?}"
@@ -148,8 +152,8 @@ JSON
         printf 'surface:26 Codex\n'
         ;;
       "")
+        # Real cmux defaults to the focused pane when --pane is omitted.
         printf '* surface:27 Claude [selected]\n'
-        printf 'surface:26 Codex\n'
         ;;
       *)
         printf 'unexpected pane: %s\n' "$pane" >&2
@@ -178,6 +182,11 @@ JSON
       printf "cd /Users/example/git && zsh -ic 'coopcc demo-project'\n"
     else
       payload="$(awk -F '\t' -v surface="$surface" '$1 == surface { value = $2 } END { print value }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || true)"
+      # Model each send/Enter cycle independently: the most recent send stays visible
+      # in the input region until an Enter for that surface submits it. Using send vs
+      # Enter counts (rather than a single Enter count) lets one surface run multiple
+      # submit cycles in a launch, e.g. the Codex /rename pair followed by $start.
+      send_count="$(awk -F '\t' -v surface="$surface" '$1 == surface { count++ } END { print count + 0 }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || true)"
       key_count="$(awk -F '\t' -v surface="$surface" '$1 == surface { count++ } END { print count + 0 }' "${CMUX_FAKE_KEY_LOG:?}" 2>/dev/null || true)"
       case "$surface" in
         surface:26)
@@ -189,10 +198,35 @@ JSON
           printf 'Opus 4.8 bypass permissions\n'
           ;;
       esac
-      if [[ -n "$payload" && "$key_count" -eq 0 ]]; then
+      if [[ "$surface" == "surface:26" ]]; then
+        rename_mode="${CMUX_FAKE_RENAME_MODE:-success}"
+        rename_name="$(awk -F '\t' -v surface="$surface" '$1 == surface { count++; if (count == 2) print $2 }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || true)"
+        if [[ "$send_count" -eq 0 ]]; then
+          printf '> \n'
+        elif [[ "$send_count" -eq 1 && "$key_count" -eq 0 ]]; then
+          printf '> /rename\n'
+        elif [[ "$send_count" -eq 1 ]]; then
+          if [[ "$rename_mode" == "no-modal" ]]; then
+            printf '> \n'
+          else
+            printf 'Rename thread\nType a name and press Enter\n> \n'
+          fi
+        elif [[ "$send_count" -eq 2 && "$key_count" -eq 1 ]]; then
+          printf 'Rename thread\nType a name and press Enter\n> %s\n' "$rename_name"
+        elif [[ "$send_count" -eq 2 ]]; then
+          if [[ "$rename_mode" == "no-success" ]]; then
+            printf 'Rename thread\nType a name and press Enter\n> %s\n' "$rename_name"
+          else
+            printf 'Session renamed to %s. To resume this session run codex resume %s\n> \n' "$rename_name" "$rename_name"
+          fi
+        elif [[ "$send_count" -gt "$key_count" ]]; then
+          printf '> %s\n' "$payload"
+        else
+          printf 'Working on request\n> \n'
+        fi
+      elif [[ -n "$payload" && "$send_count" -gt "$key_count" ]]; then
         printf '> %s\n' "$payload"
       elif [[ -n "$payload" ]]; then
-        printf 'Working on request\n'
         printf 'Running 1 shell command\n'
         printf '> \n'
       else
@@ -347,12 +381,86 @@ CMUX_PROJECT_LAUNCHER_POLL=1 \
 CMUX_PROJECT_LAUNCHER_WAIT=0 \
   $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log"
 
+# Codex is renamed post-boot with a two-step /rename before $start is sent.
+grep -Fq $'surface:26\t/rename' "$send_log"
+grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
+# Claude is named at boot via --name, so it must NOT get a post-boot /rename send.
+if grep -Fq $'surface:27\t/rename' "$send_log"; then
+  printf 'Claude should not receive a post-boot /rename send\n' >&2
+  exit 1
+fi
 grep -Fq $'surface:26\t$start demo-project' "$send_log"
 grep -Fq $'surface:27\t/start demo-project' "$send_log"
 grep -Fq $'surface:26\tenter' "$key_log"
 grep -Fq $'surface:27\tenter' "$key_log"
 grep -Fq 'demo-project' "$create_log"
 grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
+[[ ! -s "$close_log" ]]
+
+# --no-start (ad-hoc) mode: workspace + rename, but NO $start//start sends.
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project >"$stdout_log"
+
+grep -Fq $'surface:26\t/rename' "$send_log"
+grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
+if grep -Fq 'start demo-project' "$send_log"; then
+  # shellcheck disable=SC2016
+  printf 'no-start mode must not send $start//start\n' >&2
+  exit 1
+fi
+grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
+grep -Fq 'no /start sent' "$stdout_log"
+[[ ! -s "$close_log" ]]
+
+# A missing Codex rename-success marker must stop before either start prompt.
+# Preserve the live workspace so the user can inspect the still-open rename UI.
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_RENAME_MODE=no-success \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'unconfirmed Codex rename unexpectedly succeeded\n' >&2
+  exit 1
+fi
+
+grep -Fq 'did not confirm the name codex-demo-project' "$tmp_dir/stderr.log"
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'start prompt was sent after an unconfirmed Codex rename\n' >&2
+  exit 1
+fi
 [[ ! -s "$close_log" ]]
 
 : >"$send_log"
@@ -475,6 +583,42 @@ CMUX_PROJECT_LAUNCHER_WAIT=0 \
 
 grep -Fxq 'workspace:7' "$select_log"
 grep -Fq 'Reattached demo-project in workspace:7 using AMQ session demo-project' "$stdout_log"
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$create_log" ]]
+[[ ! -s "$close_log" ]]
+
+# A restored workspace with terminal runtimes but plain shells is degraded, not
+# successfully reattached. The launcher focuses it for inspection and fails closed.
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
+  CMUX_FAKE_WORKSPACE_LIST_MODE=multi \
+  CMUX_FAKE_RUNTIME_WORKSPACE=workspace:7 \
+  CMUX_FAKE_MODE=shell \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'plain-shell reattach unexpectedly succeeded\n' >&2
+  exit 1
+fi
+
+grep -Fq 'does not show a Codex session' "$tmp_dir/stderr.log"
+grep -Fxq 'workspace:7' "$select_log"
 [[ ! -s "$send_log" ]]
 [[ ! -s "$key_log" ]]
 [[ ! -s "$create_log" ]]

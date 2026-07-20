@@ -479,6 +479,33 @@ read_surface_visible_text() {
   "$cmux_bin" read-screen --workspace "$workspace_ref" --surface "$surface" --lines 80 2>/dev/null
 }
 
+wait_for_surface_literals() {
+  local surface="$1"
+  shift
+  local deadline=$((SECONDS + submit_confirm_wait_seconds))
+  local text
+  local literal
+  local found
+  while true; do
+    if ! text="$(read_surface_visible_text "$surface")"; then
+      return 2
+    fi
+    found=1
+    for literal in "$@"; do
+      if ! grep -Fq -- "$literal" <<<"$text"; then
+        found=0
+        break
+      fi
+    done
+    if [[ "$found" -eq 1 ]]; then
+      return 0
+    fi
+    (( SECONDS >= deadline )) && break
+    sleep 1
+  done
+  return 1
+}
+
 agent_activity_marker_regex() {
   local agent="$1"
   if [[ "$agent" == "codex" ]]; then
@@ -629,4 +656,37 @@ submit_prompt_when_input_ready() {
   fi
   sleep "$enter_delay_seconds"
   confirm_or_retry_enter "$surface" "$agent" "$prompt" "$visible_probe"
+}
+
+# Rename an agent's own conversation/thread via its interactive `/rename` command.
+#
+# Claude is named at boot with `claude --name <name>` (see the layout builders), so
+# this post-boot path is used for Codex, whose CLI has no session-name launch flag.
+# Codex's `/rename` opens a "Type a name and press Enter" dialog. This state
+# machine verifies that dialog before typing and requires Codex's success message
+# after the final Enter. A disappearing composer alone is not rename proof.
+rename_thread() {
+  local surface="$1"
+  local name="$2"
+  local agent="$3"
+  if ! submit_prompt "$surface" "/rename" "$agent"; then
+    echo "Could not open the $agent rename prompt; leaving the session name unchanged." >&2
+    return 1
+  fi
+  if ! wait_for_surface_literals "$surface" "Type a name and press Enter"; then
+    echo "The $agent /rename command did not open its naming dialog; refusing to type '$name'." >&2
+    return 1
+  fi
+  sleep "$enter_delay_seconds"
+  "$cmux_bin" send --workspace "$workspace_ref" --surface "$surface" "$name" >/dev/null
+  if ! wait_for_prompt_visible "$surface" "$name"; then
+    echo "Opened the $agent rename prompt but could not type the name '$name'." >&2
+    return 1
+  fi
+  sleep "$enter_delay_seconds"
+  "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" enter >/dev/null
+  if ! wait_for_surface_literals "$surface" "Session renamed to" "$name"; then
+    echo "The $agent rename dialog closed without confirming the session name '$name'." >&2
+    return 1
+  fi
 }
