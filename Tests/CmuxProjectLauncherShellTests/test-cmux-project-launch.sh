@@ -21,17 +21,13 @@ select_log="$tmp_dir/select.log"
 open_log="$tmp_dir/open.log"
 close_log="$tmp_dir/close.log"
 keepalive_log="$tmp_dir/keepalive.log"
-amq_log="$tmp_dir/amq.log"
 event_log="$tmp_dir/event.log"
-arrival_state="$tmp_dir/arrival.state"
 stdout_log="$tmp_dir/stdout.log"
 diagnostics_log="$tmp_dir/launcher.log"
 background_pids=()
 mkdir -p "$fake_amq_root"
 export CMUX_PROJECT_LAUNCHER_LOG="$diagnostics_log"
-export CMUX_FAKE_AMQ_LOG="$amq_log"
 export CMUX_FAKE_EVENT_LOG="$event_log"
-export CMUX_FAKE_ARRIVAL_STATE="$arrival_state"
 export CMUX_FAKE_AMQ_ROOT="$fake_amq_root"
 cleanup() {
   local status=$?
@@ -437,113 +433,6 @@ JSON
 {"base_root":"$CMUX_FAKE_AMQ_ROOT","root":"$CMUX_FAKE_AMQ_ROOT"}
 JSON
     ;;
-  list)
-    agent=""
-    root=""
-    session_arg=""
-    new_only=0
-    json_output=0
-    limit=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --root)
-          root="${2:?missing root}"
-          shift 2
-          ;;
-        --session)
-          session_arg="${2:?missing session}"
-          shift 2
-          ;;
-        --me)
-          agent="${2:?missing agent}"
-          shift 2
-          ;;
-        --new)
-          new_only=1
-          shift
-          ;;
-        --json)
-          json_output=1
-          shift
-          ;;
-        --limit)
-          limit="${2:?missing limit}"
-          shift 2
-          ;;
-        *)
-          shift
-          ;;
-      esac
-    done
-    [[ "$root" == "${CMUX_FAKE_AMQ_ROOT:?}/${CMUX_FAKE_EXPECT_ARCHIVE_SESSION:-demo-project}" ]]
-    [[ -z "$session_arg" ]]
-    [[ "$new_only" -eq 1 ]]
-    [[ "$json_output" -eq 1 ]]
-    [[ "$limit" == "0" ]]
-    printf 'list\t%s\n' "$agent" >>"${CMUX_FAKE_AMQ_LOG:?}"
-    case "${CMUX_FAKE_AMQ_LIST_MODE:-empty}" in
-      malformed)
-        printf '{not-json}\n'
-        ;;
-      error)
-        printf 'list failed\n' >&2
-        exit 70
-        ;;
-      backlog|concurrent)
-        if [[ "$agent" == "codex" ]]; then
-          printf '[{"id":"codex-old-1"},{"id":"codex-old-2"}]\n'
-        elif [[ "${CMUX_FAKE_AMQ_LIST_MODE:-empty}" == "concurrent" && -f "${CMUX_FAKE_ARRIVAL_STATE:?}" ]]; then
-          printf '[{"id":"claude-old-1"},{"id":"claude-late"}]\n'
-        else
-          printf '[{"id":"claude-old-1"}]\n'
-        fi
-        ;;
-      *)
-        printf '[]\n'
-        ;;
-    esac
-    ;;
-  read)
-    agent=""
-    message_id=""
-    root=""
-    session_arg=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --root)
-          root="${2:?missing root}"
-          shift 2
-          ;;
-        --session)
-          session_arg="${2:?missing session}"
-          shift 2
-          ;;
-        --me)
-          agent="${2:?missing agent}"
-          shift 2
-          ;;
-        --id)
-          message_id="${2:?missing message id}"
-          shift 2
-          ;;
-        *)
-          shift
-          ;;
-      esac
-    done
-    [[ "$root" == "${CMUX_FAKE_AMQ_ROOT:?}/${CMUX_FAKE_EXPECT_ARCHIVE_SESSION:-demo-project}" ]]
-    [[ -z "$session_arg" ]]
-    if [[ "${CMUX_FAKE_AMQ_LIST_MODE:-empty}" == "concurrent" && ! -f "${CMUX_FAKE_ARRIVAL_STATE:?}" ]]; then
-      : >"${CMUX_FAKE_ARRIVAL_STATE:?}"
-      printf 'arrival\tclaude\tclaude-late\n' >>"${CMUX_FAKE_AMQ_LOG:?}"
-    fi
-    printf 'read\t%s\t%s\n' "$agent" "$message_id" >>"${CMUX_FAKE_AMQ_LOG:?}"
-    if [[ "${CMUX_FAKE_AMQ_READ_FAIL_ID:-}" == "$message_id" ]]; then
-      printf 'read failed for %s\n' "$message_id" >&2
-      exit 70
-    fi
-    printf '{"id":"%s"}\n' "$message_id"
-    ;;
   wake)
     sleep 120
     ;;
@@ -824,18 +713,15 @@ fi
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ ! -s "$close_log" ]]
 
-# Existing backlog is frozen for both agents before any exact-id read. The fake
-# injects claude-late on the first read; it must remain unread.
+# An existing mailbox is reused without listing or reading its backlog. Managed
+# wake reattach owns the startup baseline after both agents are ready.
 : >"$send_log"
 : >"$key_log"
 : >"$event_log"
 : >"$create_log"
 : >"$close_log"
-: >"$amq_log"
-rm -f "$arrival_state"
 mkdir -p "$fake_amq_root/demo-project"
-CMUX_FAKE_AMQ_LIST_MODE=concurrent \
-  CMUX_FAKE_SEND_LOG="$send_log" \
+CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
   CMUX_FAKE_CREATE_LOG="$create_log" \
   CMUX_FAKE_SELECT_LOG="$select_log" \
@@ -849,82 +735,9 @@ CMUX_FAKE_AMQ_LIST_MODE=concurrent \
   CMUX_PROJECT_LAUNCHER_WAIT=0 \
     $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
 
-expected_amq_log="$(printf 'list\tcodex\nlist\tclaude\narrival\tclaude\tclaude-late\nread\tcodex\tcodex-old-1\nread\tcodex\tcodex-old-2\nread\tclaude\tclaude-old-1')"
-[[ "$(<"$amq_log")" == "$expected_amq_log" ]]
-if grep -Fq $'read\tclaude\tclaude-late' "$amq_log"; then
-  printf 'post-snapshot Claude arrival was incorrectly archived\n' >&2
-  exit 1
-fi
-grep -Fq 'Archived 3 pre-existing AMQ messages' "$tmp_dir/stderr.log"
+grep -Fxq 'demo-project' "$create_log"
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 rm -rf "$fake_amq_root/demo-project"
-
-# Malformed snapshot JSON is a hard archival failure and forces a mailbox path
-# that has never existed; it must never be treated as an empty inbox.
-: >"$send_log"
-: >"$key_log"
-: >"$event_log"
-: >"$create_log"
-: >"$close_log"
-: >"$amq_log"
-mkdir -p "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
-CMUX_FAKE_AMQ_LIST_MODE=malformed \
-  CMUX_FAKE_EXPECT_SESSION=demo-project-3 \
-  CMUX_FAKE_SEND_LOG="$send_log" \
-  CMUX_FAKE_KEY_LOG="$key_log" \
-  CMUX_FAKE_CREATE_LOG="$create_log" \
-  CMUX_FAKE_SELECT_LOG="$select_log" \
-  CMUX_FAKE_OPEN_LOG="$open_log" \
-  CMUX_FAKE_CLOSE_LOG="$close_log" \
-  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
-  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
-  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
-  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
-  CMUX_PROJECT_LAUNCHER_POLL=1 \
-  CMUX_PROJECT_LAUNCHER_WAIT=0 \
-    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
-
-grep -Fq 'Could not safely capture the queued AMQ message ids for demo-project/codex' "$tmp_dir/stderr.log"
-grep -Fq 'Allocating never-before-used AMQ session demo-project-3 instead' "$tmp_dir/stderr.log"
-grep -Fxq 'demo-project-3' "$create_log"
-grep -Fxq $'list\tcodex' "$amq_log"
-if grep -Fq $'read\t' "$amq_log"; then
-  printf 'malformed snapshot caused queued AMQ reads\n' >&2
-  exit 1
-fi
-rm -rf "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
-
-# A snapshot read failure is also unsafe: stop consuming immediately and boot
-# against a never-before-used mailbox instead of attaching a wake to leftovers.
-: >"$send_log"
-: >"$key_log"
-: >"$event_log"
-: >"$create_log"
-: >"$close_log"
-: >"$amq_log"
-mkdir -p "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
-CMUX_FAKE_AMQ_LIST_MODE=backlog \
-  CMUX_FAKE_AMQ_READ_FAIL_ID=codex-old-2 \
-  CMUX_FAKE_EXPECT_SESSION=demo-project-3 \
-  CMUX_FAKE_SEND_LOG="$send_log" \
-  CMUX_FAKE_KEY_LOG="$key_log" \
-  CMUX_FAKE_CREATE_LOG="$create_log" \
-  CMUX_FAKE_SELECT_LOG="$select_log" \
-  CMUX_FAKE_OPEN_LOG="$open_log" \
-  CMUX_FAKE_CLOSE_LOG="$close_log" \
-  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
-  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
-  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
-  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
-  CMUX_PROJECT_LAUNCHER_POLL=1 \
-  CMUX_PROJECT_LAUNCHER_WAIT=0 \
-    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
-
-grep -Fq 'Could not archive queued AMQ message codex-old-2 for demo-project/codex' "$tmp_dir/stderr.log"
-grep -Fq 'Allocating never-before-used AMQ session demo-project-3 instead' "$tmp_dir/stderr.log"
-grep -Fxq 'demo-project-3' "$create_log"
-expected_amq_log="$(printf 'list\tcodex\nlist\tclaude\nread\tcodex\tcodex-old-1\nread\tcodex\tcodex-old-2')"
-[[ "$(<"$amq_log")" == "$expected_amq_log" ]]
-rm -rf "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
 
 # If the naming dialog vanishes without a success marker, stop before either
 # start prompt and do not send a blind retry Enter. Preserve the workspace.

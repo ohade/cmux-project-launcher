@@ -484,108 +484,6 @@ allocate_amq_session() {
   printf '%s\n' "$candidate"
 }
 
-allocate_pristine_amq_session() {
-  local candidate="$project-2"
-  local n=3
-  while [[ -e "$amq_base_root/$candidate" ]] || session_in_use "$candidate"; do
-    candidate="$project-$n"
-    n=$((n + 1))
-    if (( n > 1001 )); then
-      echo "Could not allocate a never-before-used AMQ session for $project after 999 suffixes" >&2
-      return 1
-    fi
-  done
-  printf '%s\n' "$candidate"
-}
-
-snapshot_new_message_ids() {
-  local session="$1"
-  local agent="$2"
-  local list_json
-  if ! list_json="$("$amq_bin" list --root "$amq_base_root/$session" --me "$agent" --new --limit 0 --json)"; then
-    echo "Could not snapshot queued AMQ messages for $session/$agent." >&2
-    return 1
-  fi
-  AMQ_LIST_JSON="$list_json" /usr/bin/python3 - <<'PY'
-import json
-import os
-import sys
-
-try:
-    rows = json.loads(os.environ["AMQ_LIST_JSON"])
-except Exception:
-    sys.exit(1)
-if not isinstance(rows, list):
-    sys.exit(1)
-seen = set()
-for row in rows:
-    if not isinstance(row, dict):
-        sys.exit(1)
-    message_id = row.get("id")
-    if not isinstance(message_id, str) or not message_id or "\n" in message_id or "\r" in message_id:
-        sys.exit(1)
-    if message_id not in seen:
-        print(message_id)
-        seen.add(message_id)
-PY
-}
-
-archive_existing_amq_backlog() {
-  local session="$1"
-  local agent
-  local codex_snapshot
-  local claude_snapshot
-  local index
-  local message_id
-  local read_output
-  local archived=0
-  local -a message_agents
-  local -a message_ids
-  if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
-    printf 'would snapshot and archive existing AMQ message ids for session %q (codex,claude)\n' "$session"
-    return 0
-  fi
-
-  # Freeze both inboxes before consuming either one. Otherwise a message that
-  # arrives for Claude while Codex is being read can be mistaken for backlog.
-  if ! codex_snapshot="$(snapshot_new_message_ids "$session" codex)"; then
-    echo "Could not safely capture the queued AMQ message ids for $session/codex." >&2
-    return 1
-  fi
-  if ! claude_snapshot="$(snapshot_new_message_ids "$session" claude)"; then
-    echo "Could not safely capture the queued AMQ message ids for $session/claude." >&2
-    return 1
-  fi
-
-  message_agents=()
-  message_ids=()
-  while IFS= read -r message_id || [[ -n "$message_id" ]]; do
-    if [[ -n "$message_id" ]]; then
-      message_agents+=(codex)
-      message_ids+=("$message_id")
-    fi
-  done <<<"$codex_snapshot"
-  while IFS= read -r message_id || [[ -n "$message_id" ]]; do
-    if [[ -n "$message_id" ]]; then
-      message_agents+=(claude)
-      message_ids+=("$message_id")
-    fi
-  done <<<"$claude_snapshot"
-
-  for ((index = 0; index < ${#message_ids[@]}; index++)); do
-    agent="${message_agents[$index]}"
-    message_id="${message_ids[$index]}"
-    if ! read_output="$("$amq_bin" read --root "$amq_base_root/$session" --me "$agent" --id "$message_id" 2>&1)"; then
-      echo "Could not archive queued AMQ message $message_id for $session/$agent: $read_output" >&2
-      return 1
-    fi
-    archived=$((archived + 1))
-  done
-  if [[ "$archived" -gt 0 ]]; then
-    echo "Archived $archived pre-existing AMQ messages for $session by exact id; messages arriving after the snapshots remain queued." >&2
-  fi
-}
-
 if ! amq_base_root="$(resolve_amq_base_root)" || [[ -z "$amq_base_root" ]]; then
   echo "Could not resolve AMQ base root for session allocation." >&2
   exit 1
@@ -596,13 +494,6 @@ if ! amq_who_state="$(amq_who_json "$amq_base_root")"; then
 fi
 handle_existing_workspace_state
 amq_session="$(allocate_amq_session)"
-if [[ -d "$amq_base_root/$amq_session" ]]; then
-  if ! archive_existing_amq_backlog "$amq_session"; then
-    previous_amq_session="$amq_session"
-    amq_session="$(allocate_pristine_amq_session)"
-    echo "Could not safely archive the existing backlog for $previous_amq_session. Allocating never-before-used AMQ session $amq_session instead." >&2
-  fi
-fi
 
 layout=$(
   /usr/bin/python3 - "$project" "$amq_session" "$workspace_root" "$codex_launcher" "$claude_launcher" <<'PY'
@@ -869,8 +760,8 @@ else
 fi
 
 if [[ "$no_start" -eq 1 ]]; then
-  # Wake registration is intentionally last so a post-snapshot arrival cannot
-  # interrupt the rename control flow.
+  # Wake registration is intentionally last so baseline setup cannot inject
+  # terminal input during the rename control flow.
   reattach_ready_agent_wakes 1
   launch_ok=1
   if [[ "$codex_renamed" -eq 1 && "$claude_ready" -eq 1 ]]; then
@@ -892,8 +783,8 @@ if ! submit_prompt "$claude_surface" "/start $project" claude; then
   exit 1
 fi
 
-# Wake registration is intentionally last so a post-snapshot arrival cannot
-# interrupt either rename or start submission.
+# Wake registration is intentionally last so baseline setup cannot inject
+# terminal input during either rename or start submission.
 reattach_ready_agent_wakes 0
 
 launch_ok=1
