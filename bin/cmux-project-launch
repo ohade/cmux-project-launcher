@@ -42,10 +42,11 @@ Environment:
   CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT
                                   workspace root for coop launchers (default: ~/git)
   CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER
-                                  Codex shell function or executable (default: coopcodex)
+                                  Codex shell function or executable (default: amq_codex)
   CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER
-                                  Claude shell function or executable (default: coopcc)
+                                  Claude shell function or executable (default: amq_claude)
   CMUX_PROJECT_LAUNCHER_OPEN      open CLI path for app activation
+  CMUX_PROJECT_LAUNCHER_PS        ps CLI path for live agent-process checks
   CMUX_PROJECT_LAUNCHER_LOG       persistent diagnostics log path
   CMUX_PROJECT_LAUNCHER_DRY_RUN  print planned commands without launching
 USAGE
@@ -97,9 +98,10 @@ cmux_bin="${CMUX_PROJECT_LAUNCHER_CMUX:-/Applications/cmux.app/Contents/Resource
 amq_bin="${CMUX_PROJECT_LAUNCHER_AMQ:-amq}"
 keepalive_bin="${CMUX_PROJECT_LAUNCHER_KEEPALIVE:-$HOME/bin/amq-keepalive}"
 open_bin="${CMUX_PROJECT_LAUNCHER_OPEN:-/usr/bin/open}"
+ps_bin="${CMUX_PROJECT_LAUNCHER_PS:-/bin/ps}"
 workspace_root="${CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT:-$HOME/git}"
-codex_launcher="${CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER:-coopcodex}"
-claude_launcher="${CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER:-coopcc}"
+codex_launcher="${CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER:-amq_codex}"
+claude_launcher="${CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER:-amq_claude}"
 wait_seconds="${CMUX_PROJECT_LAUNCHER_WAIT:-8}"
 poll_seconds="${CMUX_PROJECT_LAUNCHER_POLL:-45}"
 codex_ready_regex="${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-OpenAI Codex|gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
@@ -115,6 +117,8 @@ diagnostics_log="${CMUX_PROJECT_LAUNCHER_LOG:-$HOME/Library/Logs/CmuxProjectLaun
 workspace_ref=""
 launch_ok=0
 reuse_project_session=0
+codex_wake_started=0
+claude_wake_started=0
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/lib/cmux-project-common.sh
@@ -142,9 +146,30 @@ keepalive_bin="$(expand_path "$keepalive_bin")"
 
 cleanup_failed_workspace() {
   local status=$?
+  local close_output=""
+  local cleanup_agents=""
+  trap - EXIT
   if [[ "$status" -ne 0 && "$launch_ok" -ne 1 && -n "${workspace_ref:-}" && "$keep_failed_workspace" != "1" && "$keep_failed_workspace" != "true" ]]; then
-    "$cmux_bin" workspace close "$workspace_ref" >/dev/null 2>&1 || true
+    if ! close_output="$("$cmux_bin" workspace close "$workspace_ref" 2>&1)"; then
+      echo "Failed to close unsuccessful cmux workspace $workspace_ref: $close_output" >&2
+    else
+      if [[ "$codex_wake_started" -eq 1 ]]; then
+        cleanup_agents="codex"
+      fi
+      if [[ "$claude_wake_started" -eq 1 ]]; then
+        if [[ -n "$cleanup_agents" ]]; then
+          cleanup_agents="$cleanup_agents,claude"
+        else
+          cleanup_agents="claude"
+        fi
+      fi
+      if [[ -n "$cleanup_agents" && -n "${amq_session:-}" ]]; then
+        retire_amq_session "$amq_session" "$cleanup_agents" || \
+          echo "Failed to retire AMQ wakes for unsuccessful session $amq_session; the defect remains unresolved." >&2
+      fi
+    fi
   fi
+  exit "$status"
 }
 trap cleanup_failed_workspace EXIT
 
@@ -156,20 +181,25 @@ fi
 existing_agent_health_reason=""
 existing_workspace_agents_ready() {
   local target_workspace_ref="$1"
+  local target_amq_session="$2"
   local pane_rows
   local pane_surface_rows
   local pane_ref
   local surface_rows
-  local screen
+  local process_status
   local row
   local -a pane_refs
   local -a all_surface_rows
   local -a codex_refs
   local -a claude_refs
+  local -a codex_ids
+  local -a claude_ids
   pane_refs=()
   all_surface_rows=()
   codex_refs=()
   claude_refs=()
+  codex_ids=()
+  claude_ids=()
 
   if ! pane_rows="$("$cmux_bin" list-panes --workspace "$target_workspace_ref" 2>/dev/null)"; then
     existing_agent_health_reason="its panes could not be inspected"
@@ -183,7 +213,7 @@ existing_workspace_agents_ready() {
     return 2
   fi
   for pane_ref in "${pane_refs[@]}"; do
-    if ! pane_surface_rows="$("$cmux_bin" list-pane-surfaces --workspace "$target_workspace_ref" --pane "$pane_ref" 2>/dev/null)"; then
+    if ! pane_surface_rows="$("$cmux_bin" --id-format both list-pane-surfaces --workspace "$target_workspace_ref" --pane "$pane_ref" 2>/dev/null)"; then
       existing_agent_health_reason="its agent surfaces could not be inspected"
       return 2
     fi
@@ -202,7 +232,14 @@ existing_workspace_agents_ready() {
   while IFS= read -r row || [[ -n "$row" ]]; do
     [[ -n "$row" ]] && claude_refs+=("$row")
   done < <(printf '%s\n' "$surface_rows" | surface_refs_for_name "Claude")
-  if [[ "${#codex_refs[@]}" -ne 1 || "${#claude_refs[@]}" -ne 1 ]]; then
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && codex_ids+=("$row")
+  done < <(printf '%s\n' "$surface_rows" | surface_ids_for_name "Codex")
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && claude_ids+=("$row")
+  done < <(printf '%s\n' "$surface_rows" | surface_ids_for_name "Claude")
+  if [[ "${#codex_refs[@]}" -ne 1 || "${#claude_refs[@]}" -ne 1 \
+        || "${#codex_ids[@]}" -ne 1 || "${#claude_ids[@]}" -ne 1 ]]; then
     existing_agent_health_reason="it does not contain exactly one Codex surface and one Claude surface"
     return 1
   fi
@@ -214,35 +251,78 @@ existing_workspace_agents_ready() {
     existing_agent_health_reason="its Claude surface has no live terminal runtime"
     return 1
   fi
-  if ! screen="$("$cmux_bin" read-screen --workspace "$target_workspace_ref" --surface "${codex_refs[0]}" --lines 80 2>/dev/null)" \
-    || ! grep -Eiq "$codex_ready_regex" <<<"$screen"; then
-    existing_agent_health_reason="its Codex surface is live but does not show a Codex session"
+  if ! wake_targets_surface "$target_amq_session" codex "${codex_ids[0]}"; then
+    existing_agent_health_reason="its Codex AMQ wake is not bound to the exact Codex surface"
     return 1
   fi
-  if ! screen="$("$cmux_bin" read-screen --workspace "$target_workspace_ref" --surface "${claude_refs[0]}" --lines 80 2>/dev/null)" \
-    || ! grep -Eiq "$claude_ready_regex" <<<"$screen"; then
-    existing_agent_health_reason="its Claude surface is live but does not show a Claude session"
+  if ! wake_targets_surface "$target_amq_session" claude "${claude_ids[0]}"; then
+    existing_agent_health_reason="its Claude AMQ wake is not bound to the exact Claude surface"
     return 1
   fi
+
+  process_status=0
+  surface_has_agent_process "${codex_refs[0]}" codex || process_status=$?
+  case "$process_status" in
+    0)
+      ;;
+    1)
+      existing_agent_health_reason="its Codex surface has no live Codex process"
+      return 1
+      ;;
+    *)
+      existing_agent_health_reason="its Codex process could not be inspected"
+      return 2
+      ;;
+  esac
+  process_status=0
+  surface_has_agent_process "${claude_refs[0]}" claude || process_status=$?
+  case "$process_status" in
+    0)
+      ;;
+    1)
+      existing_agent_health_reason="its Claude surface has no live Claude process"
+      return 1
+      ;;
+    *)
+      existing_agent_health_reason="its Claude process could not be inspected"
+      return 2
+      ;;
+  esac
   return 0
 }
 
 handle_existing_workspace_state() {
-  local existing_workspace_ref
+  local existing_workspace_records
   local workspace_lookup_status=0
   local runtime_status=0
   local agent_health_status=0
   local project_session_active=0
+  local candidate_ref
+  local candidate_session
+  local candidate_kind
+  local candidate_reason
+  local preferred_reason=""
+  local chosen_workspace_ref=""
+  local chosen_amq_session=""
+  local chosen_kind=""
+  local existing_refs_display=""
+  local index
+  local -a existing_workspace_refs
+  local -a existing_amq_sessions
+  local -a existing_workspace_kinds
+  existing_workspace_refs=()
+  existing_amq_sessions=()
+  existing_workspace_kinds=()
   if session_in_use "$project"; then
     project_session_active=1
   fi
 
-  existing_workspace_ref="$(workspace_ref_for_title "$project")" || workspace_lookup_status=$?
+  existing_workspace_records="$(workspace_records_for_project "$project")" || workspace_lookup_status=$?
   case "$workspace_lookup_status" in
     0)
       ;;
     1)
-      existing_workspace_ref=""
+      existing_workspace_records=""
       ;;
     *)
       echo "Could not query cmux workspaces while checking $project. Refusing to launch until cmux state can be inspected." >&2
@@ -250,41 +330,97 @@ handle_existing_workspace_state() {
       ;;
   esac
 
-  if [[ "$project_session_active" -eq 1 && -n "$existing_workspace_ref" ]]; then
-    runtime_status=0
-    workspace_has_live_runtime "$existing_workspace_ref" || runtime_status=$?
-    case "$runtime_status" in
-      0)
-        ;;
-      1)
-        echo "AMQ session $project is active and cmux workspace $existing_workspace_ref exists, but it has no live terminal runtime. Refusing to spawn a parallel room." >&2
-        exit 1
-        ;;
-      *)
-        echo "AMQ session $project is active and cmux workspace $existing_workspace_ref exists, but its terminal runtime could not be inspected. Refusing to spawn a parallel room." >&2
-        exit 1
-        ;;
-    esac
-    agent_health_status=0
-    existing_workspace_agents_ready "$existing_workspace_ref" || agent_health_status=$?
-    if [[ "$agent_health_status" -ne 0 ]]; then
-      if [[ "$dry_run" != "1" && "$dry_run" != "true" ]]; then
-        select_existing_workspace "$existing_workspace_ref" >/dev/null 2>&1 || true
+  while IFS=$'\t' read -r candidate_ref candidate_session candidate_kind || [[ -n "$candidate_ref" ]]; do
+    if [[ -n "$candidate_ref" && -n "$candidate_session" && -n "$candidate_kind" ]]; then
+      existing_workspace_refs+=("$candidate_ref")
+      existing_amq_sessions+=("$candidate_session")
+      existing_workspace_kinds+=("$candidate_kind")
+    fi
+  done <<<"$existing_workspace_records"
+
+  if [[ "${#existing_workspace_refs[@]}" -gt 0 ]]; then
+    for ((index = 0; index < ${#existing_workspace_refs[@]}; index++)); do
+      candidate_ref="${existing_workspace_refs[$index]}"
+      candidate_session="${existing_amq_sessions[$index]}"
+      candidate_kind="${existing_workspace_kinds[$index]}"
+      candidate_reason=""
+      if [[ "$candidate_kind" == "title-collision" ]]; then
+        candidate_reason="its title matches but it has no matching launcher metadata"
+      elif ! session_in_use "$candidate_session"; then
+        candidate_reason="AMQ session $candidate_session is not active"
+      else
+        runtime_status=0
+        workspace_has_live_runtime "$candidate_ref" || runtime_status=$?
+        case "$runtime_status" in
+          0)
+            ;;
+          1)
+            candidate_reason="it has no live terminal runtime"
+            ;;
+          *)
+            candidate_reason="its terminal runtime could not be inspected"
+            ;;
+        esac
+        if [[ -z "$candidate_reason" ]]; then
+          agent_health_status=0
+          existing_workspace_agents_ready "$candidate_ref" "$candidate_session" || agent_health_status=$?
+          if [[ "$agent_health_status" -ne 0 ]]; then
+            candidate_reason="$existing_agent_health_reason"
+          fi
+        fi
       fi
-      echo "AMQ session $project is active and cmux workspace $existing_workspace_ref exists, but $existing_agent_health_reason. Refusing to report a successful reattach or spawn a parallel room." >&2
+
+      if [[ "$index" -eq 0 ]]; then
+        preferred_reason="$candidate_reason"
+      fi
+      if [[ -z "$candidate_reason" ]]; then
+        chosen_workspace_ref="$candidate_ref"
+        chosen_amq_session="$candidate_session"
+        chosen_kind="$candidate_kind"
+        break
+      fi
+    done
+
+    if [[ -z "$chosen_workspace_ref" ]]; then
+      chosen_workspace_ref="${existing_workspace_refs[0]}"
+      chosen_amq_session="${existing_amq_sessions[0]}"
+      chosen_kind="${existing_workspace_kinds[0]}"
+      candidate_reason="$preferred_reason"
+    fi
+
+    if [[ "${#existing_workspace_refs[@]}" -gt 1 ]]; then
+      for candidate_ref in "${existing_workspace_refs[@]}"; do
+        if [[ -n "$existing_refs_display" ]]; then
+          existing_refs_display="$existing_refs_display, $candidate_ref"
+        else
+          existing_refs_display="$candidate_ref"
+        fi
+      done
+      echo "Found ${#existing_workspace_refs[@]} launcher matches or title collisions for project $project ($existing_refs_display). Selecting $chosen_workspace_ref and refusing to create another." >&2
+    fi
+
+    if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+      printf 'cmux workspace select %q\n' "$chosen_workspace_ref"
+    elif ! select_existing_workspace "$chosen_workspace_ref"; then
+      echo "Could not select existing cmux workspace $chosen_workspace_ref for $project" >&2
       exit 1
     fi
+
+    if [[ -n "$candidate_reason" ]]; then
+      if [[ "$chosen_kind" == "title-collision" ]]; then
+        echo "Workspace title $project is already in use by $chosen_workspace_ref, but it has no matching launcher metadata. Opened it for inspection and created nothing." >&2
+      else
+        echo "Project $project already has cmux workspace $chosen_workspace_ref using AMQ session $chosen_amq_session, but $candidate_reason. Opened it for inspection and refused to create another." >&2
+      fi
+      exit 1
+    fi
+
     if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
-      printf 'cmux workspace select %q\n' "$existing_workspace_ref"
-      printf 'would reattach %q in %q using AMQ session %q\n' "$project" "$existing_workspace_ref" "$project"
+      printf 'would reattach %q in %q using AMQ session %q\n' "$project" "$chosen_workspace_ref" "$chosen_amq_session"
       exit 0
     fi
-    if ! select_existing_workspace "$existing_workspace_ref"; then
-      echo "Could not select existing cmux workspace $existing_workspace_ref for $project" >&2
-      exit 1
-    fi
     launch_ok=1
-    printf 'Reattached %s in %s using AMQ session %s\n' "$project" "$existing_workspace_ref" "$project"
+    printf 'Reattached %s in %s using AMQ session %s\n' "$project" "$chosen_workspace_ref" "$chosen_amq_session"
     exit 0
   fi
 
@@ -293,45 +429,41 @@ handle_existing_workspace_state() {
       reuse_project_session=1
       echo "AMQ session $project had no cmux workspace. Retired its detached wakes and will reuse the original mailbox." >&2
     else
-      echo "AMQ session $project is already active, but no cmux workspace titled $project was found. Could not safely retire it. Allocating a separate AMQ session instead." >&2
+      echo "AMQ session $project is already active, but no cmux workspace for project $project was found. Could not safely retire it. Allocating a separate AMQ session instead." >&2
     fi
-  fi
-
-  if [[ -n "$existing_workspace_ref" ]]; then
-    if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
-      printf 'cmux workspace select %q\n' "$existing_workspace_ref"
-    else
-      select_existing_workspace "$existing_workspace_ref" >/dev/null 2>&1 || true
-    fi
-    echo "cmux workspace $existing_workspace_ref is titled $project, but AMQ session $project is not active. Refusing to create a duplicate workspace title." >&2
-    exit 1
   fi
 }
 
-retire_missing_workspace_session() {
-  local session_root="$amq_base_root/$project"
+retire_amq_session() {
+  local session="$1"
+  local agents="${2:-codex,claude}"
+  local session_root="$amq_base_root/$session"
   local retire_output
   if [[ ! -x "$keepalive_bin" ]]; then
     echo "Safe AMQ retirement helper is unavailable or not executable: $keepalive_bin" >&2
     return 1
   fi
   if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
-    printf 'would retire detached AMQ wakes: %q retire-session --root %q --agents codex,claude --adapter cmux --amq %q --self %q\n' \
-      "$keepalive_bin" "$session_root" "$amq_bin" "$keepalive_bin"
+    printf 'would retire detached AMQ wakes: %q retire-session --root %q --agents %q --adapter cmux --amq %q --self %q\n' \
+      "$keepalive_bin" "$session_root" "$agents" "$amq_bin" "$keepalive_bin"
     return 0
   fi
   if retire_output="$(
     "$keepalive_bin" retire-session \
       --root "$session_root" \
-      --agents codex,claude \
+      --agents "$agents" \
       --adapter cmux \
       --amq "$amq_bin" \
       --self "$keepalive_bin" 2>&1
   )"; then
     return 0
   fi
-  echo "Safe AMQ retirement refused for $project: $retire_output" >&2
+  echo "Safe AMQ retirement refused for $session: $retire_output" >&2
   return 1
+}
+
+retire_missing_workspace_session() {
+  retire_amq_session "$project" codex,claude
 }
 
 allocate_amq_session() {
@@ -352,6 +484,108 @@ allocate_amq_session() {
   printf '%s\n' "$candidate"
 }
 
+allocate_pristine_amq_session() {
+  local candidate="$project-2"
+  local n=3
+  while [[ -e "$amq_base_root/$candidate" ]] || session_in_use "$candidate"; do
+    candidate="$project-$n"
+    n=$((n + 1))
+    if (( n > 1001 )); then
+      echo "Could not allocate a never-before-used AMQ session for $project after 999 suffixes" >&2
+      return 1
+    fi
+  done
+  printf '%s\n' "$candidate"
+}
+
+snapshot_new_message_ids() {
+  local session="$1"
+  local agent="$2"
+  local list_json
+  if ! list_json="$("$amq_bin" list --root "$amq_base_root/$session" --me "$agent" --new --limit 0 --json)"; then
+    echo "Could not snapshot queued AMQ messages for $session/$agent." >&2
+    return 1
+  fi
+  AMQ_LIST_JSON="$list_json" /usr/bin/python3 - <<'PY'
+import json
+import os
+import sys
+
+try:
+    rows = json.loads(os.environ["AMQ_LIST_JSON"])
+except Exception:
+    sys.exit(1)
+if not isinstance(rows, list):
+    sys.exit(1)
+seen = set()
+for row in rows:
+    if not isinstance(row, dict):
+        sys.exit(1)
+    message_id = row.get("id")
+    if not isinstance(message_id, str) or not message_id or "\n" in message_id or "\r" in message_id:
+        sys.exit(1)
+    if message_id not in seen:
+        print(message_id)
+        seen.add(message_id)
+PY
+}
+
+archive_existing_amq_backlog() {
+  local session="$1"
+  local agent
+  local codex_snapshot
+  local claude_snapshot
+  local index
+  local message_id
+  local read_output
+  local archived=0
+  local -a message_agents
+  local -a message_ids
+  if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+    printf 'would snapshot and archive existing AMQ message ids for session %q (codex,claude)\n' "$session"
+    return 0
+  fi
+
+  # Freeze both inboxes before consuming either one. Otherwise a message that
+  # arrives for Claude while Codex is being read can be mistaken for backlog.
+  if ! codex_snapshot="$(snapshot_new_message_ids "$session" codex)"; then
+    echo "Could not safely capture the queued AMQ message ids for $session/codex." >&2
+    return 1
+  fi
+  if ! claude_snapshot="$(snapshot_new_message_ids "$session" claude)"; then
+    echo "Could not safely capture the queued AMQ message ids for $session/claude." >&2
+    return 1
+  fi
+
+  message_agents=()
+  message_ids=()
+  while IFS= read -r message_id || [[ -n "$message_id" ]]; do
+    if [[ -n "$message_id" ]]; then
+      message_agents+=(codex)
+      message_ids+=("$message_id")
+    fi
+  done <<<"$codex_snapshot"
+  while IFS= read -r message_id || [[ -n "$message_id" ]]; do
+    if [[ -n "$message_id" ]]; then
+      message_agents+=(claude)
+      message_ids+=("$message_id")
+    fi
+  done <<<"$claude_snapshot"
+
+  for ((index = 0; index < ${#message_ids[@]}; index++)); do
+    agent="${message_agents[$index]}"
+    message_id="${message_ids[$index]}"
+    if ! read_output="$("$amq_bin" read --root "$amq_base_root/$session" --me "$agent" --id "$message_id" 2>&1)"; then
+      echo "Could not archive queued AMQ message $message_id for $session/$agent: $read_output" >&2
+      return 1
+    fi
+    archived=$((archived + 1))
+  done
+  if [[ "$archived" -gt 0 ]]; then
+    echo "Archived $archived pre-existing AMQ messages for $session by exact id; messages arriving after the snapshots remain queued." >&2
+  fi
+}
+
 if ! amq_base_root="$(resolve_amq_base_root)" || [[ -z "$amq_base_root" ]]; then
   echo "Could not resolve AMQ base root for session allocation." >&2
   exit 1
@@ -362,6 +596,13 @@ if ! amq_who_state="$(amq_who_json "$amq_base_root")"; then
 fi
 handle_existing_workspace_state
 amq_session="$(allocate_amq_session)"
+if [[ -d "$amq_base_root/$amq_session" ]]; then
+  if ! archive_existing_amq_backlog "$amq_session"; then
+    previous_amq_session="$amq_session"
+    amq_session="$(allocate_pristine_amq_session)"
+    echo "Could not safely archive the existing backlog for $previous_amq_session. Allocating never-before-used AMQ session $amq_session instead." >&2
+  fi
+fi
 
 layout=$(
   /usr/bin/python3 - "$project" "$amq_session" "$workspace_root" "$codex_launcher" "$claude_launcher" <<'PY'
@@ -370,13 +611,27 @@ import shlex
 import sys
 
 project, amq_session, workspace_root, codex_launcher, claude_launcher = sys.argv[1:6]
-# coopcodex/coopcc are zsh functions in ~/.zshrc, so load them through zsh -ic.
+# The launcher words are zsh functions/aliases in ~/.zshrc, so load them through zsh -ic.
 # Claude gets `--name claude-<session>` at boot. The explicit `--` follows the
-# portable coopcc grammar and forwards the remaining args to `claude`, so the
+# portable amq_claude grammar and forwards the remaining args to `claude`, so the
 # conversation is named before /start and the name survives /clear. Codex has no
 # equivalent boot flag; it is renamed post-boot.
-codex_inner = shlex.quote(codex_launcher) + ' ' + shlex.quote(amq_session)
-claude_inner = shlex.quote(claude_launcher) + ' ' + shlex.quote(amq_session) + ' -- --name ' + shlex.quote(f"claude-{amq_session}")
+def launch_inner(launcher, extra_args=""):
+    env = {
+        "AMQ_COOP_WAKE_FLAG": "--no-wake",
+        "AMQ_KEEPALIVE_DISABLED": "1",
+    }
+    prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+    command = f"{prefix} {shlex.quote(launcher)} {shlex.quote(amq_session)}"
+    if extra_args:
+        command += " " + extra_args
+    return command
+
+codex_inner = launch_inner(codex_launcher)
+claude_inner = launch_inner(
+    claude_launcher,
+    "-- --name " + shlex.quote(f"claude-{amq_session}"),
+)
 codex_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(codex_inner)}"
 claude_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(claude_inner)}"
 layout = {
@@ -393,7 +648,7 @@ PY
 
 if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
   printf 'cmux workspace create --name %q --description %q --layout %q --focus true\n' \
-    "$amq_session" "Project launcher: $project (AMQ session: $amq_session)" "$layout"
+    "$project" "Project launcher: $project (AMQ session: $amq_session)" "$layout"
   printf 'allocated AMQ session: %q\n' "$amq_session"
   printf 'Claude session name (boot --name): %q\n' "claude-$amq_session"
   printf 'post-boot Codex rename: %q then %q + send-key enter\n' "/rename" "codex-$amq_session"
@@ -407,7 +662,7 @@ if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
 fi
 
 created=$("$cmux_bin" workspace create \
-  --name "$amq_session" \
+  --name "$project" \
   --description "Project launcher: $project (AMQ session: $amq_session)" \
   --layout "$layout" \
   --focus true)
@@ -421,22 +676,15 @@ fi
 # NOTE: bash 3.2 (the system /bin/bash a GUI-launched .app resolves via PATH) has no
 # `mapfile`/`readarray`, so these use the portable current-shell read loop. The
 # `|| [[ -n "$row" ]]` keeps a final newline-less line, matching `mapfile -t`.
-panes=()
-while IFS= read -r row || [[ -n "$row" ]]; do
-  panes+=("$row")
-done < <("$cmux_bin" list-panes --workspace "$workspace_ref" | extract_cmux_refs pane | head -n 2)
 surface_rows=()
-if [[ "${#panes[@]}" -gt 0 ]]; then
-  for pane in "${panes[@]}"; do
-    while IFS= read -r row; do
-      [[ -n "$row" ]] && surface_rows+=("$row")
-    done < <("$cmux_bin" list-pane-surfaces --workspace "$workspace_ref" --pane "$pane")
-  done
-else
-  while IFS= read -r row || [[ -n "$row" ]]; do
-    surface_rows+=("$row")
-  done < <("$cmux_bin" list-pane-surfaces --workspace "$workspace_ref")
+surface_rows_output=""
+if ! surface_rows_output="$(workspace_surface_rows "$workspace_ref" both)"; then
+  echo "Could not inspect Codex and Claude surfaces in $workspace_ref" >&2
+  exit 1
 fi
+while IFS= read -r row || [[ -n "$row" ]]; do
+  [[ -n "$row" ]] && surface_rows+=("$row")
+done <<<"$surface_rows_output"
 
 codex_surfaces=()
 while IFS= read -r row || [[ -n "$row" ]]; do
@@ -446,9 +694,18 @@ claude_surfaces=()
 while IFS= read -r row || [[ -n "$row" ]]; do
   claude_surfaces+=("$row")
 done < <(printf '%s\n' "${surface_rows[@]}" | surface_refs_for_name "Claude")
+codex_surface_ids=()
+while IFS= read -r row || [[ -n "$row" ]]; do
+  codex_surface_ids+=("$row")
+done < <(printf '%s\n' "${surface_rows[@]}" | surface_ids_for_name "Codex")
+claude_surface_ids=()
+while IFS= read -r row || [[ -n "$row" ]]; do
+  claude_surface_ids+=("$row")
+done < <(printf '%s\n' "${surface_rows[@]}" | surface_ids_for_name "Claude")
 
-if [[ "${#codex_surfaces[@]}" -ne 1 || "${#claude_surfaces[@]}" -ne 1 ]]; then
-  echo "Could not resolve Codex and Claude surfaces by name in $workspace_ref" >&2
+if [[ "${#codex_surfaces[@]}" -ne 1 || "${#claude_surfaces[@]}" -ne 1 || \
+      "${#codex_surface_ids[@]}" -ne 1 || "${#claude_surface_ids[@]}" -ne 1 ]]; then
+  echo "Could not resolve unique Codex and Claude surface refs/ids by name in $workspace_ref" >&2
   printf 'Surface rows:\n' >&2
   printf '%s\n' "${surface_rows[@]}" >&2
   "$cmux_bin" list-panes --workspace "$workspace_ref" >&2 || true
@@ -458,6 +715,8 @@ fi
 
 codex_surface="${codex_surfaces[0]}"
 claude_surface="${claude_surfaces[0]}"
+codex_surface_id="${codex_surface_ids[0]}"
+claude_surface_id="${claude_surface_ids[0]}"
 
 agent_readiness_error() {
   local reason="$1"
@@ -478,8 +737,8 @@ AMQ session: $amq_session
 Codex surface: $codex_surface, expected screen regex: $codex_ready_regex
 Claude surface: $claude_surface, expected screen regex: $claude_ready_regex
 
-If a screen dump below shows only zsh, inspect AMQ --require-wake state and the
-session's wake locks. A visible agent banner instead indicates a readiness-regex
+If a screen dump below shows only zsh, inspect the disabled-wake boot command.
+A visible agent banner instead indicates a readiness-regex
 or startup-timing mismatch, not a failed wake registration.
 Close stale cmux workspaces or restart cmux, then try again.
 Set CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE=1 to keep the failed workspace.
@@ -517,6 +776,57 @@ wait_agent_ready() {
   fi
   sleep "$wait_seconds"
   wait_for_surface_text "$surface" "$ready_regex"
+}
+
+reattach_agent_wake() {
+  local agent="$1"
+  local surface_id="$2"
+  local output
+  if [[ ! -x "$keepalive_bin" ]]; then
+    echo "AMQ keepalive helper is unavailable or not executable: $keepalive_bin" >&2
+    return 1
+  fi
+  if ! output="$(
+    "$keepalive_bin" reattach \
+      --adapter cmux \
+      --target "cmux:surface:$surface_id" \
+      --root "$amq_base_root/$amq_session" \
+      --base-root "$amq_base_root" \
+      --session "$amq_session" \
+      --me "$agent" \
+      --amq "$amq_bin" \
+      --self "$keepalive_bin" 2>&1
+  )"; then
+    echo "Could not attach the $agent AMQ wake to cmux surface $surface_id: $output" >&2
+    return 1
+  fi
+}
+
+reattach_ready_agent_wakes() {
+  local preserve_on_failure="$1"
+
+  # SessionStart is process-scoped disabled during launcher control traffic.
+  # These explicit registrations are then owned and repaired by the launchd
+  # supervisor. cmux resume bindings do not persist the inline disabled flag,
+  # so a future restored process can register its new surface normally.
+  if [[ "$codex_ready" -eq 1 ]]; then
+    if reattach_agent_wake codex "$codex_surface_id"; then
+      codex_wake_started=1
+    elif [[ "$preserve_on_failure" -ne 1 ]]; then
+      return 1
+    else
+      echo "Could not attach Codex AMQ notifications; preserving the ad-hoc workspace." >&2
+    fi
+  fi
+  if [[ "$claude_ready" -eq 1 ]]; then
+    if reattach_agent_wake claude "$claude_surface_id"; then
+      claude_wake_started=1
+    elif [[ "$preserve_on_failure" -ne 1 ]]; then
+      return 1
+    else
+      echo "Could not attach Claude AMQ notifications; preserving the ad-hoc workspace." >&2
+    fi
+  fi
 }
 
 # In --no-start (ad-hoc) mode the scratch workspace is the deliverable, so once its
@@ -559,6 +869,9 @@ else
 fi
 
 if [[ "$no_start" -eq 1 ]]; then
+  # Wake registration is intentionally last so a post-snapshot arrival cannot
+  # interrupt the rename control flow.
+  reattach_ready_agent_wakes 1
   launch_ok=1
   if [[ "$codex_renamed" -eq 1 && "$claude_ready" -eq 1 ]]; then
     echo "Launched ad-hoc workspace $amq_session in $workspace_ref (Claude name requested at boot; Codex rename confirmed; no /start sent)"
@@ -578,6 +891,10 @@ if ! submit_prompt "$claude_surface" "/start $project" claude; then
   echo "Launched $project in $workspace_ref using AMQ session $amq_session, but could not confirm Claude submitted /start." >&2
   exit 1
 fi
+
+# Wake registration is intentionally last so a post-snapshot arrival cannot
+# interrupt either rename or start submission.
+reattach_ready_agent_wakes 0
 
 launch_ok=1
 echo "Launched $project in $workspace_ref using AMQ session $amq_session"

@@ -12,6 +12,7 @@ fake_cmux="$tmp_dir/cmux"
 fake_amq="$tmp_dir/amq"
 fake_open="$tmp_dir/open"
 fake_keepalive="$tmp_dir/amq-keepalive"
+fake_ps="$tmp_dir/ps"
 fake_amq_root="$tmp_dir/amq-root"
 send_log="$tmp_dir/send.log"
 key_log="$tmp_dir/key.log"
@@ -20,12 +21,25 @@ select_log="$tmp_dir/select.log"
 open_log="$tmp_dir/open.log"
 close_log="$tmp_dir/close.log"
 keepalive_log="$tmp_dir/keepalive.log"
+amq_log="$tmp_dir/amq.log"
+event_log="$tmp_dir/event.log"
+arrival_state="$tmp_dir/arrival.state"
 stdout_log="$tmp_dir/stdout.log"
 diagnostics_log="$tmp_dir/launcher.log"
 background_pids=()
 mkdir -p "$fake_amq_root"
 export CMUX_PROJECT_LAUNCHER_LOG="$diagnostics_log"
+export CMUX_FAKE_AMQ_LOG="$amq_log"
+export CMUX_FAKE_EVENT_LOG="$event_log"
+export CMUX_FAKE_ARRIVAL_STATE="$arrival_state"
+export CMUX_FAKE_AMQ_ROOT="$fake_amq_root"
 cleanup() {
+  local status=$?
+  if [[ "$status" -ne 0 ]]; then
+    printf 'fixture failed; last stdout/stderr follow\n' >&2
+    [[ -f "$stdout_log" ]] && sed -n '1,240p' "$stdout_log" >&2
+    [[ -f "$tmp_dir/stderr.log" ]] && sed -n '1,240p' "$tmp_dir/stderr.log" >&2
+  fi
   if [[ "${#background_pids[@]}" -gt 0 ]]; then
     kill "${background_pids[@]}" 2>/dev/null || true
   fi
@@ -37,6 +51,11 @@ cat >"$fake_cmux" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
+id_format=refs
+if [[ "${1:-}" == "--id-format" ]]; then
+  id_format="${2:?missing id format}"
+  shift 2
+fi
 cmd="${1:?missing command}"
 shift
 
@@ -47,8 +66,18 @@ case "$cmd" in
     case "$subcmd" in
       create)
         layout=""
+        workspace_name=""
+        description=""
         while [[ $# -gt 0 ]]; do
           case "$1" in
+            --name)
+              workspace_name="${2:?missing name}"
+              shift 2
+              ;;
+            --description)
+              description="${2:?missing description}"
+              shift 2
+              ;;
             --layout)
               layout="${2:?missing layout}"
               shift 2
@@ -59,14 +88,22 @@ case "$cmd" in
           esac
         done
         expected_session="${CMUX_FAKE_EXPECT_SESSION:-demo-project}"
-        [[ "$layout" == *"coopcodex $expected_session"* ]]
-        [[ "$layout" == *"coopcc $expected_session"* ]]
-        # Claude is named at boot via `--name claude-<session>` forwarded through coopcc.
-        [[ "$layout" == *"coopcc $expected_session -- --name claude-$expected_session"* ]]
+        expected_project="${CMUX_FAKE_EXPECT_PROJECT:-demo-project}"
+        [[ "$workspace_name" == "$expected_project" ]]
+        [[ "$description" == "Project launcher: $expected_project (AMQ session: $expected_session)" ]]
+        [[ "$layout" == *"amq_codex $expected_session"* ]]
+        [[ "$layout" == *"amq_claude $expected_session"* ]]
+        [[ "$layout" == *"AMQ_COOP_WAKE_FLAG=--no-wake"* ]]
+        [[ "$layout" == *"AMQ_KEEPALIVE_DISABLED=1"* ]]
+        [[ "$layout" != *"AMQ_KEEPALIVE_BIN="* ]]
+        # Claude is named at boot via `--name claude-<session>` forwarded through amq_claude.
+        [[ "$layout" == *"amq_claude $expected_session -- --name claude-$expected_session"* ]]
         # Codex has no boot flag, so its command must NOT carry a --name.
-        [[ "$layout" != *"coopcodex $expected_session --name"* ]]
+        [[ "$layout" != *"amq_codex $expected_session --name"* ]]
+        [[ "$layout" != *"coopcodex $expected_session"* ]]
+        [[ "$layout" != *"coopcc $expected_session"* ]]
         [[ "$layout" != *"amq coop exec"* ]]
-        [[ "$layout" != *"--no-wake"* ]]
+        [[ "$layout" != *"--require-wake"* ]]
         printf '%s\n' "$expected_session" >>"${CMUX_FAKE_CREATE_LOG:?}"
         printf 'OK workspace:10\n'
         ;;
@@ -78,7 +115,7 @@ case "$cmd" in
   "window_ref": "window:1",
   "workspaces": [
     {"ref":"workspace:1","title":"other","selected":false},
-    {"ref":"workspace:7","title":"demo-project","selected":false}
+    {"ref":"workspace:7","title":"demo-project","description":"Project launcher: demo-project (AMQ session: demo-project)","selected":false}
   ]
 }
 JSON
@@ -88,8 +125,39 @@ JSON
 {
   "window_ref": "window:1",
   "workspaces": [
-    {"ref":"workspace:4","title":"demo-project","selected":false,"index":4},
-    {"ref":"workspace:7","title":"demo-project","selected":true,"index":7}
+    {"ref":"workspace:4","title":"demo-project","description":"Project launcher: demo-project (AMQ session: demo-project)","selected":false,"index":4},
+    {"ref":"workspace:7","title":"demo-project","description":"Project launcher: demo-project (AMQ session: demo-project)","selected":true,"index":7}
+  ]
+}
+JSON
+            ;;
+          title-collision)
+            cat <<'JSON'
+{
+  "window_ref": "window:1",
+  "workspaces": [
+    {"ref":"workspace:7","title":"demo-project","description":"Manually named workspace","selected":false,"index":7}
+  ]
+}
+JSON
+            ;;
+          suffixed-project)
+            cat <<'JSON'
+{
+  "window_ref": "window:1",
+  "workspaces": [
+    {"ref":"workspace:8","title":"demo-project-2","description":"Project launcher: demo-project (AMQ session: demo-project-2)","selected":false,"index":8,"latest_submitted_at":"2026-07-21T08:40:00Z"}
+  ]
+}
+JSON
+            ;;
+          suffixed-duplicates)
+            cat <<'JSON'
+{
+  "window_ref": "window:1",
+  "workspaces": [
+    {"ref":"workspace:7","title":"demo-project-2","description":"Project launcher: demo-project (AMQ session: demo-project-2)","selected":false,"index":7,"latest_submitted_at":null},
+    {"ref":"workspace:8","title":"demo-project-2","description":"Project launcher: demo-project (AMQ session: demo-project-2)","selected":false,"index":8,"latest_submitted_at":"2026-07-21T08:41:00Z"}
   ]
 }
 JSON
@@ -144,16 +212,33 @@ JSON
           ;;
       esac
     done
+    if [[ "${CMUX_FAKE_SURFACE_LIST_MODE:-ok}" == "partial-error" && "$pane" == "pane:11" ]]; then
+      printf 'surface:26 11111111-1111-4111-8111-111111111111 Codex\n'
+      printf 'surface enumeration failed\n' >&2
+      exit 70
+    fi
     case "$pane" in
       pane:12)
-        printf '* surface:27 Claude [selected]\n'
+        if [[ "$id_format" == "both" ]]; then
+          printf '* surface:27 22222222-2222-4222-8222-222222222222 Claude [selected]\n'
+        else
+          printf '* surface:27 Claude [selected]\n'
+        fi
         ;;
       pane:11)
-        printf 'surface:26 Codex\n'
+        if [[ "$id_format" == "both" ]]; then
+          printf 'surface:26 11111111-1111-4111-8111-111111111111 Codex\n'
+        else
+          printf 'surface:26 Codex\n'
+        fi
         ;;
       "")
         # Real cmux defaults to the focused pane when --pane is omitted.
-        printf '* surface:27 Claude [selected]\n'
+        if [[ "$id_format" == "both" ]]; then
+          printf '* surface:27 22222222-2222-4222-8222-222222222222 Claude [selected]\n'
+        else
+          printf '* surface:27 Claude [selected]\n'
+        fi
         ;;
       *)
         printf 'unexpected pane: %s\n' "$pane" >&2
@@ -200,6 +285,10 @@ JSON
       esac
       if [[ "$surface" == "surface:26" ]]; then
         rename_mode="${CMUX_FAKE_RENAME_MODE:-success}"
+        rename_retry_keys=0
+        if [[ "$rename_mode" == "missed-enter" ]]; then
+          rename_retry_keys=1
+        fi
         rename_name="$(awk -F '\t' -v surface="$surface" '$1 == surface { count++; if (count == 2) print $2 }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || true)"
         if [[ "$send_count" -eq 0 ]]; then
           printf '> \n'
@@ -209,17 +298,27 @@ JSON
           if [[ "$rename_mode" == "no-modal" ]]; then
             printf '> \n'
           else
-            printf 'Rename thread\nType a name and press Enter\n> \n'
+            printf 'Name thread\nType a name and press Enter\n> \n'
           fi
         elif [[ "$send_count" -eq 2 && "$key_count" -eq 1 ]]; then
-          printf 'Rename thread\nType a name and press Enter\n> %s\n' "$rename_name"
-        elif [[ "$send_count" -eq 2 ]]; then
-          if [[ "$rename_mode" == "no-success" ]]; then
-            printf 'Rename thread\nType a name and press Enter\n> %s\n' "$rename_name"
+          printf 'Name thread\n> %s\n' "$rename_name"
+        elif [[ "$send_count" -eq 2 && "$key_count" -eq 2 ]]; then
+          if [[ "$rename_mode" == "vanished" ]]; then
+            printf '> \n'
+          elif [[ "$rename_mode" == "stale-modal" ]]; then
+            printf 'Name thread\n> %s\nPress enter to confirm\n> ordinary prompt\n' "$rename_name"
+          elif [[ "$rename_mode" == "missed-enter" || "$rename_mode" == "no-success" ]]; then
+            printf 'Name thread\n> %s\nPress enter to confirm\n' "$rename_name"
           else
             printf 'Session renamed to %s. To resume this session run codex resume %s\n> \n' "$rename_name" "$rename_name"
           fi
-        elif [[ "$send_count" -gt "$key_count" ]]; then
+        elif [[ "$send_count" -eq 2 ]]; then
+          if [[ "$rename_mode" == "no-success" ]]; then
+            printf 'Name thread\n> %s\nPress enter to confirm\n' "$rename_name"
+          else
+            printf 'Session renamed to %s. To resume this session run codex resume %s\n> \n' "$rename_name" "$rename_name"
+          fi
+        elif [[ "$send_count" -ge 3 && "$key_count" -eq $((send_count - 1 + rename_retry_keys)) ]]; then
           printf '> %s\n' "$payload"
         else
           printf 'Working on request\n> \n'
@@ -286,6 +385,7 @@ JSON
       esac
     done
     printf '%s\t%s\n' "$surface" "$payload" >>"${CMUX_FAKE_SEND_LOG:?}"
+    printf 'send\t%s\t%s\n' "$surface" "$payload" >>"${CMUX_FAKE_EVENT_LOG:?}"
     ;;
   send-key)
     surface=""
@@ -302,6 +402,7 @@ JSON
       esac
     done
     printf '%s\t%s\n' "$surface" "$key" >>"${CMUX_FAKE_KEY_LOG:?}"
+    printf 'key\t%s\t%s\n' "$surface" "$key" >>"${CMUX_FAKE_EVENT_LOG:?}"
     ;;
   *)
     printf 'unexpected command: %s\n' "$cmd" >&2
@@ -315,7 +416,9 @@ cat >"$fake_amq" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-case "${1:?missing command}" in
+command="${1:?missing command}"
+shift
+case "$command" in
   who)
     if [[ "${CMUX_FAKE_AMQ_WHO_MODE:-empty}" == "demo-project-active" ]]; then
       cat <<'JSON'
@@ -334,16 +437,202 @@ JSON
 {"base_root":"$CMUX_FAKE_AMQ_ROOT","root":"$CMUX_FAKE_AMQ_ROOT"}
 JSON
     ;;
+  list)
+    agent=""
+    root=""
+    session_arg=""
+    new_only=0
+    json_output=0
+    limit=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --root)
+          root="${2:?missing root}"
+          shift 2
+          ;;
+        --session)
+          session_arg="${2:?missing session}"
+          shift 2
+          ;;
+        --me)
+          agent="${2:?missing agent}"
+          shift 2
+          ;;
+        --new)
+          new_only=1
+          shift
+          ;;
+        --json)
+          json_output=1
+          shift
+          ;;
+        --limit)
+          limit="${2:?missing limit}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    [[ "$root" == "${CMUX_FAKE_AMQ_ROOT:?}/${CMUX_FAKE_EXPECT_ARCHIVE_SESSION:-demo-project}" ]]
+    [[ -z "$session_arg" ]]
+    [[ "$new_only" -eq 1 ]]
+    [[ "$json_output" -eq 1 ]]
+    [[ "$limit" == "0" ]]
+    printf 'list\t%s\n' "$agent" >>"${CMUX_FAKE_AMQ_LOG:?}"
+    case "${CMUX_FAKE_AMQ_LIST_MODE:-empty}" in
+      malformed)
+        printf '{not-json}\n'
+        ;;
+      error)
+        printf 'list failed\n' >&2
+        exit 70
+        ;;
+      backlog|concurrent)
+        if [[ "$agent" == "codex" ]]; then
+          printf '[{"id":"codex-old-1"},{"id":"codex-old-2"}]\n'
+        elif [[ "${CMUX_FAKE_AMQ_LIST_MODE:-empty}" == "concurrent" && -f "${CMUX_FAKE_ARRIVAL_STATE:?}" ]]; then
+          printf '[{"id":"claude-old-1"},{"id":"claude-late"}]\n'
+        else
+          printf '[{"id":"claude-old-1"}]\n'
+        fi
+        ;;
+      *)
+        printf '[]\n'
+        ;;
+    esac
+    ;;
+  read)
+    agent=""
+    message_id=""
+    root=""
+    session_arg=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --root)
+          root="${2:?missing root}"
+          shift 2
+          ;;
+        --session)
+          session_arg="${2:?missing session}"
+          shift 2
+          ;;
+        --me)
+          agent="${2:?missing agent}"
+          shift 2
+          ;;
+        --id)
+          message_id="${2:?missing message id}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    [[ "$root" == "${CMUX_FAKE_AMQ_ROOT:?}/${CMUX_FAKE_EXPECT_ARCHIVE_SESSION:-demo-project}" ]]
+    [[ -z "$session_arg" ]]
+    if [[ "${CMUX_FAKE_AMQ_LIST_MODE:-empty}" == "concurrent" && ! -f "${CMUX_FAKE_ARRIVAL_STATE:?}" ]]; then
+      : >"${CMUX_FAKE_ARRIVAL_STATE:?}"
+      printf 'arrival\tclaude\tclaude-late\n' >>"${CMUX_FAKE_AMQ_LOG:?}"
+    fi
+    printf 'read\t%s\t%s\n' "$agent" "$message_id" >>"${CMUX_FAKE_AMQ_LOG:?}"
+    if [[ "${CMUX_FAKE_AMQ_READ_FAIL_ID:-}" == "$message_id" ]]; then
+      printf 'read failed for %s\n' "$message_id" >&2
+      exit 70
+    fi
+    printf '{"id":"%s"}\n' "$message_id"
+    ;;
   wake)
     sleep 120
     ;;
   *)
-    printf 'unexpected amq command: %s\n' "$1" >&2
+    printf 'unexpected amq command: %s\n' "$command" >&2
     exit 64
     ;;
 esac
 SH
 chmod +x "$fake_amq"
+
+cat >"$fake_ps" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+pid=""
+tty=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p)
+      pid="${2:?missing pid}"
+      shift 2
+      ;;
+    -t)
+      tty="${2:?missing tty}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "$pid" ]]; then
+  if [[ "$pid" == "${CMUX_FAKE_CODEX_WAKE_PID:-}" ]]; then
+    agent=codex
+    target="cmux:surface:${CMUX_FAKE_CODEX_SURFACE_ID:-11111111-1111-4111-8111-111111111111}"
+  elif [[ "$pid" == "${CMUX_FAKE_CLAUDE_WAKE_PID:-}" ]]; then
+    agent=claude
+    target="cmux:surface:${CMUX_FAKE_CLAUDE_SURFACE_ID:-22222222-2222-4222-8222-222222222222}"
+  else
+    exit 1
+  fi
+  root="${CMUX_FAKE_WAKE_COMMAND_ROOT:-${CMUX_FAKE_AMQ_ROOT:?}/${CMUX_FAKE_WAKE_SESSION:?}}"
+  printf '/tmp/amq wake -root %s -me %s -inject-via /tmp/amq-keepalive -inject-arg inject -inject-arg cmux -inject-arg %s\n' \
+    "$root" "$agent" "$target"
+  exit 0
+fi
+
+case "${CMUX_FAKE_AGENT_PROCESS_MODE:-ready}:$tty" in
+  ready:ttys026)
+    printf '/Users/example/.local/bin/codex-pretty --enable hooks\n'
+    ;;
+  ready:ttys027)
+    printf '/opt/homebrew/bin/claude --session-id fixture\n'
+    ;;
+  shell:*)
+    printf '/bin/zsh -l\n'
+    ;;
+  error:*)
+    printf 'ps failed\n' >&2
+    exit 70
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$fake_ps"
+export CMUX_PROJECT_LAUNCHER_PS="$fake_ps"
+
+setup_fake_wakes() {
+  local session="$1"
+  local session_root="$fake_amq_root/$session"
+  mkdir -p "$session_root/agents/codex" "$session_root/agents/claude"
+  sleep 120 &
+  codex_wake_pid=$!
+  sleep 120 &
+  claude_wake_pid=$!
+  background_pids+=("$codex_wake_pid" "$claude_wake_pid")
+  printf '{"pid":%s,"root":"%s","agent":"codex"}\n' "$codex_wake_pid" "$session_root" \
+    >"$session_root/agents/codex/.wake.lock"
+  printf '{"pid":%s,"root":"%s","agent":"claude"}\n' "$claude_wake_pid" "$session_root" \
+    >"$session_root/agents/claude/.wake.lock"
+  export CMUX_FAKE_CODEX_WAKE_PID="$codex_wake_pid"
+  export CMUX_FAKE_CLAUDE_WAKE_PID="$claude_wake_pid"
+  export CMUX_FAKE_WAKE_SESSION="$session"
+  unset CMUX_FAKE_WAKE_COMMAND_ROOT
+}
 
 cat >"$fake_open" <<'SH'
 #!/usr/bin/env bash
@@ -356,12 +645,59 @@ cat >"$fake_keepalive" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >>"${CMUX_FAKE_KEEPALIVE_LOG:?}"
-if [[ "${CMUX_FAKE_KEEPALIVE_MODE:-refuse}" != "success" ]]; then
-  printf 'target absence not proven\n' >&2
-  exit 1
-fi
-[[ "${1:-}" == "retire-session" ]]
-printf '{"root":"%s","adapter":"cmux","entries":[]}\n' "${CMUX_PROJECT_LAUNCHER_AMQ_ROOT:?}"
+command="${1:?missing command}"
+shift
+case "$command" in
+  reattach)
+    agent=""
+    target=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --me)
+          agent="${2:?missing agent}"
+          shift 2
+          ;;
+        --target)
+          target="${2:?missing target}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf 'reattach\t%s\t%s\n' "$agent" "$target" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    if [[ "${CMUX_FAKE_KEEPALIVE_REATTACH_FAIL:-}" == "$agent" ]]; then
+      printf 'reattach failed for %s\n' "$agent" >&2
+      exit 1
+    fi
+    printf '{"root":"%s","adapter":"cmux","entries":[]}\n' "${CMUX_PROJECT_LAUNCHER_AMQ_ROOT:?}"
+    ;;
+  retire-session)
+    agents=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --agents)
+          agents="${2:?missing agents}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf 'retire\t%s\n' "$agents" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    if [[ "${CMUX_FAKE_KEEPALIVE_MODE:-refuse}" != "success" ]]; then
+      printf 'target absence not proven\n' >&2
+      exit 1
+    fi
+    printf '{"root":"%s","adapter":"cmux","entries":[]}\n' "${CMUX_PROJECT_LAUNCHER_AMQ_ROOT:?}"
+    ;;
+  *)
+    printf 'unexpected keepalive command: %s\n' "$command" >&2
+    exit 64
+    ;;
+esac
 SH
 chmod +x "$fake_keepalive"
 export CMUX_PROJECT_LAUNCHER_KEEPALIVE="$fake_keepalive"
@@ -381,7 +717,8 @@ CMUX_PROJECT_LAUNCHER_POLL=1 \
 CMUX_PROJECT_LAUNCHER_WAIT=0 \
   $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log"
 
-# Codex is renamed post-boot with a two-step /rename before $start is sent.
+# Codex is renamed post-boot with the naming dialog's confirmation Enter before
+# $start is sent.
 grep -Fq $'surface:26\t/rename' "$send_log"
 grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
 # Claude is named at boot via --name, so it must NOT get a post-boot /rename send.
@@ -396,10 +733,24 @@ grep -Fq $'surface:27\tenter' "$key_log"
 grep -Fq 'demo-project' "$create_log"
 grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
 [[ ! -s "$close_log" ]]
+grep -Fq 'cmux:surface:11111111-1111-4111-8111-111111111111' "$keepalive_log"
+grep -Fq 'cmux:surface:22222222-2222-4222-8222-222222222222' "$keepalive_log"
+awk -F '\t' '
+  $1 == "send" && $2 == "surface:26" && $3 == "$start demo-project" { codex_start = 1 }
+  $1 == "send" && $2 == "surface:27" && $3 == "/start demo-project" { claude_start = 1 }
+  $1 == "key" && $2 == "surface:26" { codex_keys++ }
+  $1 == "key" && $2 == "surface:27" { claude_keys++ }
+  $1 == "reattach" {
+    if (!codex_start || !claude_start || codex_keys < 3 || claude_keys < 1) exit 2
+    reattachments++
+  }
+  END { if (reattachments != 2) exit 3 }
+' "$event_log"
 
 # --no-start (ad-hoc) mode: workspace + rename, but NO $start//start sends.
 : >"$send_log"
 : >"$key_log"
+: >"$event_log"
 : >"$create_log"
 : >"$select_log"
 : >"$open_log"
@@ -428,11 +779,238 @@ fi
 grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
 grep -Fq 'no /start sent' "$stdout_log"
 [[ ! -s "$close_log" ]]
+awk -F '\t' '
+  $1 == "send" && $2 == "surface:26" && $3 == "codex-demo-project" { rename_name = 1 }
+  $1 == "send" && $3 ~ /start demo-project/ { exit 2 }
+  $1 == "key" && $2 == "surface:26" { codex_keys++ }
+  $1 == "reattach" {
+    if (!rename_name || codex_keys < 2) exit 3
+    reattachments++
+  }
+  END { if (reattachments != 2) exit 4 }
+' "$event_log"
 
-# A missing Codex rename-success marker must stop before either start prompt.
-# Preserve the live workspace so the user can inspect the still-open rename UI.
+# If Codex leaves the confirmation footer active after the first name Enter,
+# send exactly one additional Enter, observe the success marker, and continue.
 : >"$send_log"
 : >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_RENAME_MODE=missed-enter \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project >"$stdout_log"
+
+[[ "$(awk -F '\t' '$1 == "surface:26" { count++ } END { print count + 0 }' "$key_log")" -eq 3 ]]
+grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'missed-enter rename test unexpectedly sent a start prompt\n' >&2
+  exit 1
+fi
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+[[ ! -s "$close_log" ]]
+
+# Existing backlog is frozen for both agents before any exact-id read. The fake
+# injects claude-late on the first read; it must remain unread.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$close_log"
+: >"$amq_log"
+rm -f "$arrival_state"
+mkdir -p "$fake_amq_root/demo-project"
+CMUX_FAKE_AMQ_LIST_MODE=concurrent \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+expected_amq_log="$(printf 'list\tcodex\nlist\tclaude\narrival\tclaude\tclaude-late\nread\tcodex\tcodex-old-1\nread\tcodex\tcodex-old-2\nread\tclaude\tclaude-old-1')"
+[[ "$(<"$amq_log")" == "$expected_amq_log" ]]
+if grep -Fq $'read\tclaude\tclaude-late' "$amq_log"; then
+  printf 'post-snapshot Claude arrival was incorrectly archived\n' >&2
+  exit 1
+fi
+grep -Fq 'Archived 3 pre-existing AMQ messages' "$tmp_dir/stderr.log"
+rm -rf "$fake_amq_root/demo-project"
+
+# Malformed snapshot JSON is a hard archival failure and forces a mailbox path
+# that has never existed; it must never be treated as an empty inbox.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$close_log"
+: >"$amq_log"
+mkdir -p "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
+CMUX_FAKE_AMQ_LIST_MODE=malformed \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-3 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+grep -Fq 'Could not safely capture the queued AMQ message ids for demo-project/codex' "$tmp_dir/stderr.log"
+grep -Fq 'Allocating never-before-used AMQ session demo-project-3 instead' "$tmp_dir/stderr.log"
+grep -Fxq 'demo-project-3' "$create_log"
+grep -Fxq $'list\tcodex' "$amq_log"
+if grep -Fq $'read\t' "$amq_log"; then
+  printf 'malformed snapshot caused queued AMQ reads\n' >&2
+  exit 1
+fi
+rm -rf "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
+
+# A snapshot read failure is also unsafe: stop consuming immediately and boot
+# against a never-before-used mailbox instead of attaching a wake to leftovers.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$close_log"
+: >"$amq_log"
+mkdir -p "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
+CMUX_FAKE_AMQ_LIST_MODE=backlog \
+  CMUX_FAKE_AMQ_READ_FAIL_ID=codex-old-2 \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-3 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+grep -Fq 'Could not archive queued AMQ message codex-old-2 for demo-project/codex' "$tmp_dir/stderr.log"
+grep -Fq 'Allocating never-before-used AMQ session demo-project-3 instead' "$tmp_dir/stderr.log"
+grep -Fxq 'demo-project-3' "$create_log"
+expected_amq_log="$(printf 'list\tcodex\nlist\tclaude\nread\tcodex\tcodex-old-1\nread\tcodex\tcodex-old-2')"
+[[ "$(<"$amq_log")" == "$expected_amq_log" ]]
+rm -rf "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
+
+# If the naming dialog vanishes without a success marker, stop before either
+# start prompt and do not send a blind retry Enter. Preserve the workspace.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_RENAME_MODE=vanished \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'unconfirmed Codex rename unexpectedly succeeded\n' >&2
+  exit 1
+fi
+
+grep -Fq 'did not confirm the session name' "$tmp_dir/stderr.log"
+[[ "$(awk -F '\t' '$1 == "surface:26" { count++ } END { print count + 0 }' "$key_log")" -eq 2 ]]
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'start prompt was sent without a Codex rename success marker\n' >&2
+  exit 1
+fi
+if grep -Fq $'reattach\t' "$event_log"; then
+  printf 'wake was reattached without a Codex rename success marker\n' >&2
+  exit 1
+fi
+[[ ! -s "$close_log" ]]
+
+# A stale modal transcript must not trigger a blind retry if the active footer
+# has already returned to an ordinary prompt.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_RENAME_MODE=stale-modal \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'stale rename modal unexpectedly triggered a successful retry\n' >&2
+  exit 1
+fi
+
+grep -Fq 'did not confirm the name codex-demo-project' "$tmp_dir/stderr.log"
+[[ "$(awk -F '\t' '$1 == "surface:26" { count++ } END { print count + 0 }' "$key_log")" -eq 2 ]]
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'start prompt was sent after a stale rename modal\n' >&2
+  exit 1
+fi
+if grep -Fq $'reattach\t' "$event_log"; then
+  printf 'wake was reattached after a stale rename modal\n' >&2
+  exit 1
+fi
+[[ ! -s "$close_log" ]]
+
+# A missing Codex rename-success marker after the confirmation Enter must also
+# stop before either start prompt and preserve the live workspace for inspection.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
 : >"$create_log"
 : >"$select_log"
 : >"$open_log"
@@ -459,6 +1037,10 @@ fi
 grep -Fq 'did not confirm the name codex-demo-project' "$tmp_dir/stderr.log"
 if grep -Fq 'start demo-project' "$send_log"; then
   printf 'start prompt was sent after an unconfirmed Codex rename\n' >&2
+  exit 1
+fi
+if grep -Fq $'reattach\t' "$event_log"; then
+  printf 'wake was reattached after an unconfirmed Codex rename\n' >&2
   exit 1
 fi
 [[ ! -s "$close_log" ]]
@@ -492,9 +1074,9 @@ fi
 grep -Fq 'demo-project' "$create_log"
 grep -Fq 'workspace:10' "$close_log"
 grep -Fq 'Refusing to send' "$tmp_dir/stderr.log"
-grep -Fq 'wake lock' "$tmp_dir/stderr.log"
+grep -Fq 'disabled-wake boot command' "$tmp_dir/stderr.log"
 grep -Fq 'Refusing to send' "$diagnostics_log"
-grep -Fq 'wake lock' "$diagnostics_log"
+grep -Fq 'disabled-wake boot command' "$diagnostics_log"
 [[ "$(stat -f '%Lp' "$diagnostics_log")" == "600" ]]
 
 : >"$send_log"
@@ -527,6 +1109,43 @@ grep -Fq 'demo-project' "$create_log"
 grep -Fq 'workspace:10' "$close_log"
 grep -Fq 'Refusing to send' "$tmp_dir/stderr.log"
 
+# A pane-surface query that emits a partial row and then fails must not be
+# mistaken for a successful enumeration.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_SURFACE_LIST_MODE=partial-error \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'partial surface enumeration unexpectedly succeeded\n' >&2
+  exit 1
+fi
+
+grep -Fq 'cmux list-pane-surfaces failed for workspace:10/pane:11' "$tmp_dir/stderr.log"
+grep -Fxq 'workspace:10' "$close_log"
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$event_log" ]]
+
+# Existing-workspace reuse is proven cumulatively: exact wake ownership plus
+# live Codex/Claude processes on each surface TTY.
+setup_fake_wakes demo-project
+
 : >"$send_log"
 : >"$key_log"
 : >"$create_log"
@@ -553,6 +1172,78 @@ CMUX_PROJECT_LAUNCHER_WAIT=0 \
 grep -Fq 'workspace:7' "$select_log"
 grep -Fq 'Reattached demo-project in workspace:7 using AMQ session demo-project' "$stdout_log"
 grep -Fq -- '-b com.cmuxterm.app' "$open_log"
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$create_log" ]]
+[[ ! -s "$close_log" ]]
+
+# A sibling AMQ root is not equivalent even when it shares the expected prefix.
+# Focus the degraded workspace, but never report it as reattached.
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
+  CMUX_FAKE_WORKSPACE_LIST_MODE=demo-project \
+  CMUX_FAKE_RUNTIME_WORKSPACE=workspace:7 \
+  CMUX_FAKE_WAKE_COMMAND_ROOT="$fake_amq_root/demo-project-2" \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'wrong-root wake unexpectedly passed existing-workspace checks\n' >&2
+  exit 1
+fi
+
+grep -Fq 'Codex AMQ wake is not bound to the exact Codex surface' "$tmp_dir/stderr.log"
+grep -Fxq 'workspace:7' "$select_log"
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$create_log" ]]
+[[ ! -s "$close_log" ]]
+
+# An exact title without launcher metadata is only a collision. Open it for
+# inspection, create nothing, and never bind it to the project's AMQ room.
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
+  CMUX_FAKE_WORKSPACE_LIST_MODE=title-collision \
+  CMUX_FAKE_RUNTIME_WORKSPACE=workspace:7 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'title-only collision unexpectedly reattached\n' >&2
+  exit 1
+fi
+
+grep -Fq 'has no matching launcher metadata' "$tmp_dir/stderr.log"
+grep -Fq 'created nothing' "$tmp_dir/stderr.log"
+grep -Fxq 'workspace:7' "$select_log"
 [[ ! -s "$send_log" ]]
 [[ ! -s "$key_log" ]]
 [[ ! -s "$create_log" ]]
@@ -588,8 +1279,75 @@ grep -Fq 'Reattached demo-project in workspace:7 using AMQ session demo-project'
 [[ ! -s "$create_log" ]]
 [[ ! -s "$close_log" ]]
 
+# A launcher workspace whose internal AMQ room is suffixed is still the same
+# project. Resolve it from the structured description and never create another.
+setup_fake_wakes demo-project-2
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
+  CMUX_FAKE_WORKSPACE_LIST_MODE=suffixed-project \
+  CMUX_FAKE_RUNTIME_WORKSPACE=workspace:8 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log"
+
+grep -Fxq 'workspace:8' "$select_log"
+grep -Fq 'Reattached demo-project in workspace:8 using AMQ session demo-project-2' "$stdout_log"
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$create_log" ]]
+[[ ! -s "$close_log" ]]
+
+# Existing duplicates are never deleted implicitly. If the newest candidate is
+# stale, keep evaluating same-session siblings and open the healthy one.
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
+  CMUX_FAKE_WORKSPACE_LIST_MODE=suffixed-duplicates \
+  CMUX_FAKE_RUNTIME_WORKSPACE=workspace:7 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+grep -Fxq 'workspace:7' "$select_log"
+grep -Fq 'Found 2 launcher matches or title collisions for project demo-project (workspace:8, workspace:7)' "$tmp_dir/stderr.log"
+grep -Fq 'Reattached demo-project in workspace:7 using AMQ session demo-project-2' "$stdout_log"
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$create_log" ]]
+[[ ! -s "$close_log" ]]
+
 # A restored workspace with terminal runtimes but plain shells is degraded, not
 # successfully reattached. The launcher focuses it for inspection and fails closed.
+setup_fake_wakes demo-project
 : >"$send_log"
 : >"$key_log"
 : >"$create_log"
@@ -599,7 +1357,7 @@ grep -Fq 'Reattached demo-project in workspace:7 using AMQ session demo-project'
 if CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
   CMUX_FAKE_WORKSPACE_LIST_MODE=multi \
   CMUX_FAKE_RUNTIME_WORKSPACE=workspace:7 \
-  CMUX_FAKE_MODE=shell \
+  CMUX_FAKE_AGENT_PROCESS_MODE=shell \
   CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
   CMUX_FAKE_CREATE_LOG="$create_log" \
@@ -617,7 +1375,7 @@ if CMUX_FAKE_AMQ_WHO_MODE=demo-project-active \
   exit 1
 fi
 
-grep -Fq 'does not show a Codex session' "$tmp_dir/stderr.log"
+grep -Fq 'has no live Codex process' "$tmp_dir/stderr.log"
 grep -Fxq 'workspace:7' "$select_log"
 [[ ! -s "$send_log" ]]
 [[ ! -s "$key_log" ]]
@@ -720,8 +1478,8 @@ grep -Fq 'terminal runtime could not be inspected' "$tmp_dir/stderr.log"
 [[ ! -s "$send_log" ]]
 [[ ! -s "$key_log" ]]
 [[ ! -s "$create_log" ]]
-[[ ! -s "$select_log" ]]
-[[ ! -s "$open_log" ]]
+grep -Fxq 'workspace:7' "$select_log"
+grep -Fq -- '-b com.cmuxterm.app' "$open_log"
 
 : >"$send_log"
 : >"$key_log"
@@ -754,8 +1512,8 @@ grep -Fq 'no live terminal runtime' "$tmp_dir/stderr.log"
 [[ ! -s "$send_log" ]]
 [[ ! -s "$key_log" ]]
 [[ ! -s "$create_log" ]]
-[[ ! -s "$select_log" ]]
-[[ ! -s "$open_log" ]]
+grep -Fxq 'workspace:7' "$select_log"
+grep -Fq -- '-b com.cmuxterm.app' "$open_log"
 
 : >"$send_log"
 : >"$key_log"
@@ -788,8 +1546,8 @@ grep -Fq 'no live terminal runtime' "$tmp_dir/stderr.log"
 [[ ! -s "$send_log" ]]
 [[ ! -s "$key_log" ]]
 [[ ! -s "$create_log" ]]
-[[ ! -s "$select_log" ]]
-[[ ! -s "$open_log" ]]
+grep -Fxq 'workspace:7' "$select_log"
+grep -Fq -- '-b com.cmuxterm.app' "$open_log"
 
 : >"$send_log"
 : >"$key_log"
@@ -939,6 +1697,48 @@ grep -Fq 'Launched demo-project in workspace:10 using AMQ session demo-project-3
 [[ ! -s "$open_log" ]]
 [[ ! -s "$close_log" ]]
 rm -rf "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
+
+# If the second post-control-flow wake registration fails, close the failed
+# workspace and retire only the first registration that actually succeeded.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+: >"$keepalive_log"
+if CMUX_FAKE_KEEPALIVE_MODE=success \
+  CMUX_FAKE_KEEPALIVE_REATTACH_FAIL=claude \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'Claude reattach failure unexpectedly succeeded\n' >&2
+  exit 1
+fi
+
+grep -Fq 'Could not attach the claude AMQ wake' "$tmp_dir/stderr.log"
+grep -Fxq 'workspace:10' "$close_log"
+grep -Fxq $'retire\tcodex' "$event_log"
+if grep -Fxq $'retire\tcodex,claude' "$event_log"; then
+  printf 'cleanup retired a wake that never attached\n' >&2
+  exit 1
+fi
+awk -F '\t' '
+  $1 == "send" && $2 == "surface:26" && $3 == "$start demo-project" { codex_start = 1 }
+  $1 == "send" && $2 == "surface:27" && $3 == "/start demo-project" { claude_start = 1 }
+  $1 == "reattach" && (!codex_start || !claude_start) { exit 2 }
+' "$event_log"
 
 : >"$send_log"
 : >"$key_log"

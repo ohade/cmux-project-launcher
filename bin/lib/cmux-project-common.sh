@@ -49,6 +49,29 @@ surface_refs_for_name() {
   '
 }
 
+surface_ids_for_name() {
+  local wanted="$1"
+  awk -v wanted="$wanted" '
+    {
+      surface_id = ""
+      found_name = 0
+      for (i = 1; i <= NF; i++) {
+        token = $i
+        sub(/^\*/, "", token)
+        if (length(token) == 36 && token ~ /^[[:xdigit:]-]+$/) {
+          surface_id = token
+        }
+        if (token == wanted) {
+          found_name = 1
+        }
+      }
+      if (surface_id != "" && found_name == 1) {
+        print surface_id
+      }
+    }
+  '
+}
+
 surface_debug_block() {
   local surface="$1"
   "$cmux_bin" debug-terminals 2>/dev/null | awk -v surface="$surface" '
@@ -68,6 +91,103 @@ surface_has_live_runtime() {
   grep -Eq 'runtime=[1-9][0-9]*' <<<"$block" \
     && grep -Eq '(^|[[:space:]])tty=[^[:space:]]+' <<<"$block" \
     && ! grep -Eq '(^|[[:space:]])tty=nil' <<<"$block"
+}
+
+surface_tty() {
+  local surface="$1"
+  local terminals
+  if ! terminals="$("$cmux_bin" debug-terminals 2>/dev/null)"; then
+    return 2
+  fi
+  SURFACE_REF="$surface" TERMINALS="$terminals" /usr/bin/python3 <<'PY'
+import os
+import re
+import sys
+
+surface = os.environ["SURFACE_REF"]
+blocks = re.split(r"(?=^\[[0-9]+\] )", os.environ["TERMINALS"], flags=re.M)
+for block in blocks:
+    if f" {surface} " not in f" {block} ":
+        continue
+    if not re.search(r"runtime=[1-9][0-9]*", block):
+        sys.exit(1)
+    match = re.search(r"(?<![A-Za-z])tty=([^ \n]+)", block)
+    if not match or match.group(1) == "nil":
+        sys.exit(1)
+    print(match.group(1))
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+surface_has_agent_process() {
+  local surface="$1"
+  local agent="$2"
+  local tty
+  local processes
+  local process_regex
+  tty="$(surface_tty "$surface")" || return $?
+  if ! processes="$("${ps_bin:-/bin/ps}" -ww -t "$tty" -o args= 2>/dev/null)"; then
+    return 2
+  fi
+  case "$agent" in
+    codex)
+      process_regex='(^|[[:space:]/])(codex|codex-pretty)([[:space:]]|$)'
+      ;;
+    claude)
+      process_regex='(^|[[:space:]/])claude([[:space:]]|$)'
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+  grep -Eq "$process_regex" <<<"$processes"
+}
+
+workspace_surface_rows() {
+  local target_workspace_ref="$1"
+  local id_format="${2:-refs}"
+  local pane_output
+  local surface_output
+  local row
+  local pane
+  local -a pane_refs
+  pane_refs=()
+
+  if ! pane_output="$("$cmux_bin" list-panes --workspace "$target_workspace_ref" 2>&1)"; then
+    echo "cmux list-panes failed for $target_workspace_ref: $pane_output" >&2
+    return 2
+  fi
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && pane_refs+=("$row")
+  done < <(printf '%s\n' "$pane_output" | extract_cmux_refs pane | head -n 2)
+
+  if [[ "${#pane_refs[@]}" -gt 0 ]]; then
+    for pane in "${pane_refs[@]}"; do
+      if [[ "$id_format" == "both" ]]; then
+        if ! surface_output="$("$cmux_bin" --id-format both list-pane-surfaces --workspace "$target_workspace_ref" --pane "$pane" 2>&1)"; then
+          echo "cmux list-pane-surfaces failed for $target_workspace_ref/$pane: $surface_output" >&2
+          return 2
+        fi
+      elif ! surface_output="$("$cmux_bin" list-pane-surfaces --workspace "$target_workspace_ref" --pane "$pane" 2>&1)"; then
+        echo "cmux list-pane-surfaces failed for $target_workspace_ref/$pane: $surface_output" >&2
+        return 2
+      fi
+      [[ -n "$surface_output" ]] && printf '%s\n' "$surface_output"
+    done
+    return 0
+  fi
+
+  if [[ "$id_format" == "both" ]]; then
+    if ! surface_output="$("$cmux_bin" --id-format both list-pane-surfaces --workspace "$target_workspace_ref" 2>&1)"; then
+      echo "cmux list-pane-surfaces failed for $target_workspace_ref: $surface_output" >&2
+      return 2
+    fi
+  elif ! surface_output="$("$cmux_bin" list-pane-surfaces --workspace "$target_workspace_ref" 2>&1)"; then
+    echo "cmux list-pane-surfaces failed for $target_workspace_ref: $surface_output" >&2
+    return 2
+  fi
+  [[ -n "$surface_output" ]] && printf '%s\n' "$surface_output"
 }
 
 amq_candidate_paths() {
@@ -269,6 +389,97 @@ PY
   return 1
 }
 
+wake_targets_surface() {
+  local session="$1"
+  local agent="$2"
+  local surface_id="$3"
+  local lock="$amq_base_root/$session/agents/$agent/.wake.lock"
+  local pid
+  local command_line
+  [[ -f "$lock" ]] || return 1
+  pid="$(/usr/bin/python3 - "$lock" "$amq_base_root/$session" "$agent" <<'PY'
+import json
+import os
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+pid = data.get("pid")
+root = data.get("root")
+agent = data.get("agent")
+expected_root = os.path.abspath(os.path.expanduser(sys.argv[2]))
+if (
+    isinstance(pid, int)
+    and pid > 0
+    and isinstance(root, str)
+    and os.path.abspath(os.path.expanduser(root)) == expected_root
+    and agent == sys.argv[3]
+):
+    print(pid)
+    sys.exit(0)
+sys.exit(1)
+PY
+)" || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  command_line="$("${ps_bin:-/bin/ps}" -ww -p "$pid" -o command= 2>/dev/null)" || return 1
+  /usr/bin/python3 - "$command_line" "$amq_base_root/$session" "$agent" "cmux:surface:$surface_id" <<'PY'
+import os
+import shlex
+import sys
+
+try:
+    argv = shlex.split(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+expected_root = os.path.abspath(os.path.expanduser(sys.argv[2]))
+expected_agent = sys.argv[3]
+expected_target = sys.argv[4]
+
+wake_index = None
+for index in range(len(argv) - 1):
+    if os.path.basename(argv[index]) == "amq" and argv[index + 1] == "wake":
+        wake_index = index + 2
+        break
+if wake_index is None:
+    sys.exit(1)
+
+root = None
+agent = None
+inject_args = []
+index = wake_index
+while index < len(argv):
+    token = argv[index]
+    if token in ("-root", "--root") and index + 1 < len(argv):
+        root = argv[index + 1]
+        index += 2
+        continue
+    if token.startswith("-root=") or token.startswith("--root="):
+        root = token.split("=", 1)[1]
+    elif token in ("-me", "--me") and index + 1 < len(argv):
+        agent = argv[index + 1]
+        index += 2
+        continue
+    elif token.startswith("-me=") or token.startswith("--me="):
+        agent = token.split("=", 1)[1]
+    elif token in ("-inject-arg", "--inject-arg") and index + 1 < len(argv):
+        inject_args.append(argv[index + 1])
+        index += 2
+        continue
+    elif token.startswith("-inject-arg=") or token.startswith("--inject-arg="):
+        inject_args.append(token.split("=", 1)[1])
+    index += 1
+
+if root is None or os.path.abspath(os.path.expanduser(root)) != expected_root:
+    sys.exit(1)
+if agent != expected_agent or expected_target not in inject_args:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
 session_in_use() {
   local session="$1"
   if wake_lock_active "$session"; then
@@ -277,20 +488,24 @@ session_in_use() {
   session_active_in_who "$session" "$amq_who_state"
 }
 
-workspace_ref_for_title() {
-  local title="$1"
-  CMUX_BIN="$cmux_bin" /usr/bin/python3 - "$title" <<'PY'
+workspace_records_for_project() {
+  local project="$1"
+  CMUX_BIN="$cmux_bin" /usr/bin/python3 - "$project" <<'PY'
 import json
 import os
 import re
 import subprocess
 import sys
 
-title = sys.argv[1]
+project = sys.argv[1]
 cmux = os.environ["CMUX_BIN"]
 candidates = []
 seen_refs = set()
 order = 0
+launcher_description = re.compile(
+    r"^Project launcher: ([A-Za-z0-9][A-Za-z0-9._-]*) "
+    r"\(AMQ session: ([A-Za-z0-9][A-Za-z0-9._-]*)\)$"
+)
 
 def run(args):
     result = subprocess.run(
@@ -326,17 +541,67 @@ def collect(output):
     for workspace in workspaces:
         if not isinstance(workspace, dict):
             continue
-        if workspace.get("title") != title:
+        title = workspace.get("title")
+        description = workspace.get("description")
+        metadata_match = (
+            launcher_description.fullmatch(description)
+            if isinstance(description, str)
+            else None
+        )
+        if (
+            isinstance(description, str)
+            and description.startswith(f"Project launcher: {project} ")
+            and not metadata_match
+        ):
+            print(
+                f"malformed cmux launcher metadata for project {project}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        launcher_owned = bool(metadata_match and metadata_match.group(1) == project)
+        if launcher_owned:
+            session = metadata_match.group(2)
+            kind = "launcher"
+        elif title == project:
+            if metadata_match:
+                print(
+                    f"cmux workspace metadata conflict for project {project}: "
+                    f"title belongs to launcher project {metadata_match.group(1)}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            session = project
+            kind = "title-collision"
+        else:
             continue
         ref = workspace.get("ref")
-        if not ref or ref in seen_refs:
+        if (
+            not isinstance(ref, str)
+            or not ref
+            or any(character in ref for character in "\t\r\n")
+            or ref in seen_refs
+        ):
             continue
         seen_refs.add(ref)
         index = workspace.get("index")
         if not isinstance(index, int):
-            index = 999999
+            index = -1
         selected = bool(workspace.get("selected"))
-        candidates.append((0 if selected else 1, index, order, ref))
+        latest_submitted_at = workspace.get("latest_submitted_at")
+        if not isinstance(latest_submitted_at, str):
+            latest_submitted_at = ""
+        candidates.append(
+            {
+                "launcher_owned": launcher_owned,
+                "selected": selected,
+                "latest_submitted_at": latest_submitted_at,
+                "index": index,
+                "order": order,
+                "ref": ref,
+                "session": session,
+                "kind": kind,
+            }
+        )
         order += 1
 
 collect(run(["workspace", "list", "--json"]))
@@ -345,8 +610,15 @@ for line in run(["list-windows"]).splitlines():
     if match:
         collect(run(["workspace", "list", "--json", "--window", match.group(1)]))
 
+# Stable sorts encode this priority: launcher metadata, selected, recent activity,
+# then newest workspace index (with discovery order only as the final tie-breaker).
+candidates.sort(key=lambda item: (item["index"], -item["order"]), reverse=True)
+candidates.sort(key=lambda item: item["latest_submitted_at"], reverse=True)
+candidates.sort(key=lambda item: item["selected"], reverse=True)
+candidates.sort(key=lambda item: item["launcher_owned"], reverse=True)
 if candidates:
-    print(sorted(candidates)[0][3])
+    for candidate in candidates:
+        print(f"{candidate['ref']}\t{candidate['session']}\t{candidate['kind']}")
     sys.exit(0)
 sys.exit(1)
 PY
@@ -662,13 +934,35 @@ submit_prompt_when_input_ready() {
 #
 # Claude is named at boot with `claude --name <name>` (see the layout builders), so
 # this post-boot path is used for Codex, whose CLI has no session-name launch flag.
-# Codex's `/rename` opens a "Type a name and press Enter" dialog. This state
-# machine verifies that dialog before typing and requires Codex's success message
-# after the final Enter. A disappearing composer alone is not rename proof.
+# Codex's `/rename` opens a "Type a name and press Enter" dialog whose footer
+# already says "Press enter to confirm". The Enter that submits the name also
+# confirms the rename. Require a new matching success marker after that Enter;
+# retry only while the same naming dialog, exact name, and active confirmation
+# footer remain at the bottom of the visible input region. Codex replaces the
+# initial "Type a name" placeholder after text is entered, so it is not part of
+# the post-name active-state check.
+# A disappearing composer alone is not rename proof.
+rename_dialog_is_active() {
+  local text="$1"
+  local name="$2"
+  local input_region
+  local last_nonblank
+  input_region="$(printf '%s\n' "$text" | tail -n "$input_probe_lines")"
+  last_nonblank="$(awk 'NF { line = $0 } END { print line }' <<<"$input_region")"
+  grep -Eq -- '(^|[[:space:]])(Name|Rename) thread([[:space:]]|$)' <<<"$input_region" \
+    && grep -Fq -- "$name" <<<"$input_region" \
+    && [[ "$last_nonblank" == *"Press enter to confirm"* ]]
+}
+
 rename_thread() {
   local surface="$1"
   local name="$2"
   local agent="$3"
+  local attempt
+  local baseline_successes
+  local deadline
+  local text
+  local successes
   if ! submit_prompt "$surface" "/rename" "$agent"; then
     echo "Could not open the $agent rename prompt; leaving the session name unchanged." >&2
     return 1
@@ -683,10 +977,31 @@ rename_thread() {
     echo "Opened the $agent rename prompt but could not type the name '$name'." >&2
     return 1
   fi
-  sleep "$enter_delay_seconds"
-  "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" enter >/dev/null
-  if ! wait_for_surface_literals "$surface" "Session renamed to" "$name"; then
-    echo "The $agent rename dialog closed without confirming the session name '$name'." >&2
+  if ! text="$(read_surface_visible_text "$surface")"; then
+    echo "Could not inspect the $agent rename dialog before confirming '$name'." >&2
     return 1
   fi
+  baseline_successes="$(grep -Fc -- "Session renamed to $name" <<<"$text" || true)"
+  sleep "$enter_delay_seconds"
+  for ((attempt = 1; attempt <= enter_retries; attempt++)); do
+    "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" enter >/dev/null
+    deadline=$((SECONDS + submit_confirm_wait_seconds))
+    while true; do
+      if ! text="$(read_surface_visible_text "$surface")"; then
+        echo "Could not inspect the $agent rename result for '$name'." >&2
+        return 1
+      fi
+      successes="$(grep -Fc -- "Session renamed to $name" <<<"$text" || true)"
+      if [[ "$successes" -gt "$baseline_successes" ]]; then
+        return 0
+      fi
+      (( SECONDS >= deadline )) && break
+      sleep 1
+    done
+    if ! rename_dialog_is_active "$text" "$name"; then
+      break
+    fi
+  done
+  echo "The $agent rename dialog did not confirm the session name '$name'." >&2
+  return 1
 }

@@ -556,22 +556,15 @@ PY
   # NOTE: bash 3.2 (the system /bin/bash a GUI-launched .app resolves via PATH) has no
   # `mapfile`/`readarray`, so these use the portable current-shell read loop. The
   # `|| [[ -n "$row" ]]` keeps a final newline-less line, matching `mapfile -t`.
-  panes=()
-  while IFS= read -r row || [[ -n "$row" ]]; do
-    panes+=("$row")
-  done < <("$cmux_bin" list-panes --workspace "$workspace_ref" | extract_cmux_refs pane | head -n 2)
   surface_rows=()
-  if [[ "${#panes[@]}" -gt 0 ]]; then
-    for pane in "${panes[@]}"; do
-      while IFS= read -r row; do
-        [[ -n "$row" ]] && surface_rows+=("$row")
-      done < <("$cmux_bin" list-pane-surfaces --workspace "$workspace_ref" --pane "$pane")
-    done
-  else
-    while IFS= read -r row || [[ -n "$row" ]]; do
-      surface_rows+=("$row")
-    done < <("$cmux_bin" list-pane-surfaces --workspace "$workspace_ref")
+  surface_rows_output=""
+  if ! surface_rows_output="$(workspace_surface_rows "$workspace_ref")"; then
+    echo "Could not inspect Codex and Claude surfaces in $workspace_ref" >&2
+    exit 1
   fi
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && surface_rows+=("$row")
+  done <<<"$surface_rows_output"
 
   codex_surfaces=()
   while IFS= read -r row || [[ -n "$row" ]]; do

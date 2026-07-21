@@ -209,6 +209,11 @@ case "$cmd" in
           ;;
       esac
     done
+    if [[ "${CMUX_FAKE_LIST_PANE_SURFACES_MODE:-ok}" == "partial-failure" && "$pane" == "pane:11" ]]; then
+      printf '* surface:26 Codex [selected]\n'
+      printf 'simulated list-pane-surfaces failure after partial output\n' >&2
+      exit 70
+    fi
     case "$pane" in
       pane:11)
         printf '* surface:26 Codex [selected]\n'
@@ -255,8 +260,12 @@ case "$cmd" in
         printf 'Rename thread\nType a name and press Enter\n> \n'
       elif [[ "$codex_send" -eq 2 && "$codex_key" -eq 1 ]]; then
         printf 'Rename thread\nType a name and press Enter\n> %s\n' "$codex_name"
-      else
+      elif [[ "$codex_send" -eq 2 ]]; then
         printf 'Session renamed to %s. To resume this session run codex resume %s\n> \n' "$codex_name" "$codex_name"
+      elif [[ "$codex_send" -ge 3 && "$codex_key" -eq "$codex_send" ]]; then
+        printf '> %s\n' "$codex_payload"
+      else
+        printf 'Working on request\n> \n'
       fi
       exit 0
     fi
@@ -442,6 +451,7 @@ grep -Fq 'Project creation brief' "$send_log"
 # Codex is renamed post-boot before Claude's /start.
 grep -Fq $'surface:26\t/rename' "$send_log"
 grep -Fq $'surface:26\tcodex-display' "$send_log"
+[[ "$(awk -F '\t' '$1 == "surface:26" { count++ } END { print count + 0 }' "$key_log")" -eq 2 ]]
 # The second Claude-surface send is the brief (right after /start); Codex sends are on surface:26.
 [[ "$(awk -F '\t' '$1 == "surface:27" { c++ } c == 2 { print $2; exit }' "$send_log")" == Project\ creation\ brief* ]]
 # shellcheck disable=SC2016
@@ -462,6 +472,37 @@ if grep -Fq 'cml-display-create' "$create_log"; then
   printf 'create leaked the internal helper prefix into the persistent workspace\n' >&2
   exit 1
 fi
+
+# A partial surface row is not usable when cmux exits nonzero. Fail before any
+# rename/start/brief send and close the helper workspace that was just created.
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$close_log"
+rm -f "$fake_progress/progress__display.md"
+if CMUX_FAKE_LIST_PANE_SURFACES_MODE=partial-failure \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_FAKE_PROGRESS_ROOT="$fake_progress" \
+  CMUX_FAKE_AMQ_ROOT="$tmp_dir/amq-root" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_PROGRESS_ROOT="$fake_progress" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+    $create_bash "$repo_root/bin/cmux-project-create" --mode create --project display --brief-file "$brief_file" >"$stdout_log" 2>"$stderr_log"; then
+  printf 'partial list-pane-surfaces failure unexpectedly succeeded\n' >&2
+  exit 1
+fi
+
+grep -Fq 'cmux list-pane-surfaces failed for workspace:42/pane:11' "$stderr_log"
+grep -Fq 'simulated list-pane-surfaces failure after partial output' "$stderr_log"
+grep -Fq 'Could not inspect Codex and Claude surfaces in workspace:42' "$stderr_log"
+grep -Fxq 'workspace:42' "$close_log"
+[[ -s "$create_log" ]]
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
 
 : >"$send_log"
 : >"$key_log"
