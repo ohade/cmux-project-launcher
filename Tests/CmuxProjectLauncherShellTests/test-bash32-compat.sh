@@ -90,6 +90,11 @@ run_fixture() {
     grep -n 'command not found' "$log" >&2
     fail=1
   fi
+  if grep -q 'unbound variable' "$log"; then
+    printf 'FAIL: %s leaked "unbound variable"\n' "$label" >&2
+    grep -n 'unbound variable' "$log" >&2
+    fail=1
+  fi
   rm -f "$log"
 }
 

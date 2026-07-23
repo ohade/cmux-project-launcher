@@ -671,9 +671,22 @@ select_existing_workspace() {
 
 pane_for_surface() {
   local wanted_surface="$1"
+  local pane_output
+  local row
   local pane
   local surfaces
-  for pane in "${panes[@]}"; do
+  local -a pane_refs
+  pane_refs=()
+  if ! pane_output="$("$cmux_bin" list-panes --workspace "$workspace_ref" 2>/dev/null)"; then
+    return 1
+  fi
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && pane_refs+=("$row")
+  done < <(printf '%s\n' "$pane_output" | extract_cmux_refs pane)
+  if [[ "${#pane_refs[@]}" -eq 0 ]]; then
+    return 1
+  fi
+  for pane in "${pane_refs[@]}"; do
     if surfaces="$("$cmux_bin" list-pane-surfaces --workspace "$workspace_ref" --pane "$pane" 2>/dev/null)" \
       && grep -Fq -- "$wanted_surface" <<<"$surfaces"; then
       printf '%s\n' "$pane"
