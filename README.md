@@ -23,10 +23,12 @@ Create-project flow:
 - Launches a project workspace with Codex and Claude panes.
 - Names the underlying Claude conversation `claude-<session>` at boot and
   confirms Codex's `codex-<session>` rename before sending either start prompt.
-- Leaves every pre-existing AMQ message unread; the post-ready managed wake
-  baseline suppresses those files while later arrivals remain eligible.
-- Defers AMQ wake registration until rename and both start submissions have
-  completed, so queued messages cannot interrupt launcher control traffic.
+- Leaves every pre-existing AMQ message unread by capturing its exact unread
+  floor before each agent starts; messages arriving during startup remain
+  eligible for notification.
+- Defers AMQ wake attachment to each agent's SessionStart hook, when the TUI
+  owns its exact cmux surface, and requires that hook to verify notifier
+  readiness or display a visible warning.
 - Identifies launcher workspaces by their structured project metadata, so an
   internal suffixed AMQ room still reopens the existing project workspace.
 - Normal launch keeps the visible workspace title equal to the project name;
@@ -49,16 +51,17 @@ Create-project flow:
   `/Applications/cmux.app/Contents/Resources/bin/cmux` or via
   `CMUX_PROJECT_LAUNCHER_CMUX`. Version 0.64.20 contains the upstream Codex
   YOLO/danger-mode restore fixes required by these workspaces.
-- AMQ CLI installed with `wake --baseline-existing` support. The launcher
-  prefers explicit paths and common install locations before falling back to
-  `PATH`.
+- AMQ CLI installed with `coop exec --defer-wake` and `wake --baseline-file`
+  support. The launcher prefers explicit paths and common install locations
+  before falling back to `PATH`.
 - Local shell launchers for normal project launch:
   - `amq_codex <session>` for Codex.
   - `amq_claude <session> -- <agent-arguments>` for Claude. Inside cmux it must
     execute the per-surface `CMUX_CLAUDE_WRAPPER_SHIM`, not a bare Claude
     binary, so cmux can record a resumable Claude session.
-  - Both launchers must honor `AMQ_COOP_WAKE_FLAG=--no-wake`; the project
-    launcher performs the exact-surface reattach after its control flow.
+  - Both launchers must honor `AMQ_COOP_WAKE_FLAG=--defer-wake`. AMQ captures
+    the prelaunch unread floor, and the installed SessionStart hook must attach
+    and verify the exact surface or show a visible wake-unavailable warning.
   - Any Claude SessionStart hook that emits `sessionTitle` must preserve an
     explicit `--name` from the cmux launch metadata; otherwise it will replace
     the launcher's `claude-<session>` name immediately after boot.
@@ -104,8 +107,7 @@ Additional overrides:
 - `CMUX_PROJECT_LAUNCHER_AMQ`: AMQ executable path.
 - `CMUX_PROJECT_LAUNCHER_AMQ_ROOT`: AMQ base root.
 - `CMUX_PROJECT_LAUNCHER_KEEPALIVE`: `amq-keepalive` executable used for
-  identity-verified stale-wake retirement and exact-surface reattach. Defaults to
-  `~/bin/amq-keepalive`.
+  identity-verified stale-wake retirement. Defaults to `~/bin/amq-keepalive`.
 - `CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS`: colon-separated AMQ paths or dirs for
   GUI-launched environments.
 - `CMUX_PROJECT_LAUNCHER_START_PRECOMPUTE`: project-list helper.
@@ -174,8 +176,9 @@ bin/cmux-project-create --mode create \
   probe, target mismatch, or ownership race preserves the old room and falls
   back to a suffixed session.
 - Reusing an existing mailbox never lists or reads its backlog. Safety comes
-  from delayed, exact-surface wake registration plus AMQ's startup baseline,
-  not from mutating queue state or manufacturing delivery receipts.
+  from AMQ's exact prelaunch unread-floor manifest plus SessionStart
+  exact-surface attachment, not from mutating queue state or manufacturing
+  delivery receipts.
 - Prompts are sent only after live terminal runtime and agent readiness checks.
   Existing workspaces are considered healthy only when each structured agent
   surface has both an exact AMQ wake target and the expected live process on
@@ -186,14 +189,14 @@ bin/cmux-project-create --mode create \
   dialog and name remain visible.
 - Prompt submission is confirmed through current visible cmux output; read
   failures are treated as failures, not success.
-- Fresh agents boot with both AMQ wake creation and their process-scoped
-  SessionStart keepalive disabled. Exact UUID wake targets are attached only
-  after Codex rename and both normal start submissions complete; launchd then
-  supervises them. Managed reattach must pass `--baseline-existing`, leaving
-  old inbox messages unread and receipt-free while notifying only for later
-  arrivals. `--no-start` attaches after the rename flow. cmux resume bindings
-  do not persist the inline disabled environment, so a restored agent can
-  register its new surface normally.
+- Fresh agents boot with `AMQ_COOP_WAKE_FLAG=--defer-wake`. AMQ captures an
+  exact unread-floor manifest before exec; SessionStart then attaches the exact
+  UUID surface with that manifest and verifies `notifier_live`. Capture or
+  attachment failure does not block the TUI, but it must produce a visible
+  “AMQ wake unavailable; messages remain queued” warning. The launcher never
+  performs a second manual reattach. If a later launcher check fails and the
+  new workspace is closed, cleanup attempts identity-safe retirement for both
+  agent wakes.
 - Create success requires both a progress-file content change and a new local
   update commit after the scaffold baseline.
 - Temporary create/draft files are written under Application Support with
@@ -212,8 +215,8 @@ Tests/CmuxProjectLauncherShellTests/test-bash32-compat.sh
 The shell fixtures use fake cmux, AMQ, keepalive, Claude, and progress helpers.
 They cover launch routing, metadata-based project reattach, duplicate-workspace
 prevention, exact-room stale-wake retirement, backlog preservation without
-AMQ reads, fail-closed AMQ/cmux state, post-control-flow wake ordering, prompt
-submission, create-project gates, and Bash 3.2 compatibility.
+AMQ reads, fail-closed AMQ/cmux state, deferred SessionStart wake generation,
+prompt submission, create-project gates, and Bash 3.2 compatibility.
 
 ## License
 

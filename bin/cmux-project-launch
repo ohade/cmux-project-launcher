@@ -117,8 +117,6 @@ diagnostics_log="${CMUX_PROJECT_LAUNCHER_LOG:-$HOME/Library/Logs/CmuxProjectLaun
 workspace_ref=""
 launch_ok=0
 reuse_project_session=0
-codex_wake_started=0
-claude_wake_started=0
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/lib/cmux-project-common.sh
@@ -153,17 +151,12 @@ cleanup_failed_workspace() {
     if ! close_output="$("$cmux_bin" workspace close "$workspace_ref" 2>&1)"; then
       echo "Failed to close unsuccessful cmux workspace $workspace_ref: $close_output" >&2
     else
-      if [[ "$codex_wake_started" -eq 1 ]]; then
-        cleanup_agents="codex"
-      fi
-      if [[ "$claude_wake_started" -eq 1 ]]; then
-        if [[ -n "$cleanup_agents" ]]; then
-          cleanup_agents="$cleanup_agents,claude"
-        else
-          cleanup_agents="claude"
-        fi
-      fi
-      if [[ -n "$cleanup_agents" && -n "${amq_session:-}" ]]; then
+      # Deferred SessionStart hooks may already have attached either agent's
+      # wake before launcher-side readiness or naming fails. Retirement is
+      # identity-safe and fail-closed, so always attempt both after the failed
+      # workspace has been closed instead of guessing which hook succeeded.
+      if [[ -n "${amq_session:-}" ]]; then
+        cleanup_agents="codex,claude"
         retire_amq_session "$amq_session" "$cleanup_agents" || \
           echo "Failed to retire AMQ wakes for unsuccessful session $amq_session; the defect remains unresolved." >&2
       fi
@@ -509,8 +502,9 @@ project, amq_session, workspace_root, codex_launcher, claude_launcher = sys.argv
 # equivalent boot flag; it is renamed post-boot.
 def launch_inner(launcher, extra_args=""):
     env = {
-        "AMQ_COOP_WAKE_FLAG": "--no-wake",
-        "AMQ_KEEPALIVE_DISABLED": "1",
+        # Capture the unread floor before exec; SessionStart owns exact-surface
+        # attachment and readiness verification once the TUI has started.
+        "AMQ_COOP_WAKE_FLAG": "--defer-wake",
     }
     prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     command = f"{prefix} {shlex.quote(launcher)} {shlex.quote(amq_session)}"
@@ -628,7 +622,7 @@ AMQ session: $amq_session
 Codex surface: $codex_surface, expected screen regex: $codex_ready_regex
 Claude surface: $claude_surface, expected screen regex: $claude_ready_regex
 
-If a screen dump below shows only zsh, inspect the disabled-wake boot command.
+If a screen dump below shows only zsh, inspect the deferred-wake boot command.
 A visible agent banner instead indicates a readiness-regex
 or startup-timing mismatch, not a failed wake registration.
 Close stale cmux workspaces or restart cmux, then try again.
@@ -667,57 +661,6 @@ wait_agent_ready() {
   fi
   sleep "$wait_seconds"
   wait_for_surface_text "$surface" "$ready_regex"
-}
-
-reattach_agent_wake() {
-  local agent="$1"
-  local surface_id="$2"
-  local output
-  if [[ ! -x "$keepalive_bin" ]]; then
-    echo "AMQ keepalive helper is unavailable or not executable: $keepalive_bin" >&2
-    return 1
-  fi
-  if ! output="$(
-    "$keepalive_bin" reattach \
-      --adapter cmux \
-      --target "cmux:surface:$surface_id" \
-      --root "$amq_base_root/$amq_session" \
-      --base-root "$amq_base_root" \
-      --session "$amq_session" \
-      --me "$agent" \
-      --amq "$amq_bin" \
-      --self "$keepalive_bin" 2>&1
-  )"; then
-    echo "Could not attach the $agent AMQ wake to cmux surface $surface_id: $output" >&2
-    return 1
-  fi
-}
-
-reattach_ready_agent_wakes() {
-  local preserve_on_failure="$1"
-
-  # SessionStart is process-scoped disabled during launcher control traffic.
-  # These explicit registrations are then owned and repaired by the launchd
-  # supervisor. cmux resume bindings do not persist the inline disabled flag,
-  # so a future restored process can register its new surface normally.
-  if [[ "$codex_ready" -eq 1 ]]; then
-    if reattach_agent_wake codex "$codex_surface_id"; then
-      codex_wake_started=1
-    elif [[ "$preserve_on_failure" -ne 1 ]]; then
-      return 1
-    else
-      echo "Could not attach Codex AMQ notifications; preserving the ad-hoc workspace." >&2
-    fi
-  fi
-  if [[ "$claude_ready" -eq 1 ]]; then
-    if reattach_agent_wake claude "$claude_surface_id"; then
-      claude_wake_started=1
-    elif [[ "$preserve_on_failure" -ne 1 ]]; then
-      return 1
-    else
-      echo "Could not attach Claude AMQ notifications; preserving the ad-hoc workspace." >&2
-    fi
-  fi
 }
 
 # In --no-start (ad-hoc) mode the scratch workspace is the deliverable, so once its
@@ -760,9 +703,6 @@ else
 fi
 
 if [[ "$no_start" -eq 1 ]]; then
-  # Wake registration is intentionally last so baseline setup cannot inject
-  # terminal input during the rename control flow.
-  reattach_ready_agent_wakes 1
   launch_ok=1
   if [[ "$codex_renamed" -eq 1 && "$claude_ready" -eq 1 ]]; then
     echo "Launched ad-hoc workspace $amq_session in $workspace_ref (Claude name requested at boot; Codex rename confirmed; no /start sent)"
@@ -782,10 +722,6 @@ if ! submit_prompt "$claude_surface" "/start $project" claude; then
   echo "Launched $project in $workspace_ref using AMQ session $amq_session, but could not confirm Claude submitted /start." >&2
   exit 1
 fi
-
-# Wake registration is intentionally last so baseline setup cannot inject
-# terminal input during either rename or start submission.
-reattach_ready_agent_wakes 0
 
 launch_ok=1
 echo "Launched $project in $workspace_ref using AMQ session $amq_session"
