@@ -91,7 +91,7 @@ case "$cmd" in
         [[ "$layout" == *"amq_claude $expected_session"* ]]
         [[ "$layout" == *"AMQ_COOP_WAKE_FLAG=--defer-wake"* ]]
         [[ "$layout" != *"AMQ_COOP_WAKE_FLAG=--no-wake"* ]]
-        [[ "$layout" != *"AMQ_KEEPALIVE_DISABLED"* ]]
+        [[ "$layout" == *"AMQ_KEEPALIVE_DISABLED=1"* ]]
         [[ "$layout" != *"AMQ_KEEPALIVE_BIN="* ]]
         # Claude is named at boot via `--name claude-<session>` forwarded through amq_claude.
         [[ "$layout" == *"amq_claude $expected_session -- --name claude-$expected_session"* ]]
@@ -101,6 +101,10 @@ case "$cmd" in
         [[ "$layout" != *"coopcc $expected_session"* ]]
         [[ "$layout" != *"amq coop exec"* ]]
         [[ "$layout" != *"--require-wake"* ]]
+        mkdir -p "${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/codex"
+        mkdir -p "${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/claude"
+        printf '{}\n' >"${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/codex/.wake-baseline-launch.json"
+        printf '{}\n' >"${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/claude/.wake-baseline-launch.json"
         printf '%s\n' "$expected_session" >>"${CMUX_FAKE_CREATE_LOG:?}"
         printf 'OK workspace:10\n'
         ;;
@@ -538,6 +542,36 @@ printf '%s\n' "$@" >>"${CMUX_FAKE_KEEPALIVE_LOG:?}"
 command="${1:?missing command}"
 shift
 case "$command" in
+  reattach)
+    agent=""
+    target=""
+    baseline=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --me)
+          agent="${2:?missing agent}"
+          shift 2
+          ;;
+        --target)
+          target="${2:?missing target}"
+          shift 2
+          ;;
+        --baseline-file)
+          baseline="${2:?missing baseline}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf 'reattach\t%s\t%s\t%s\n' "$agent" "$target" "$baseline" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    if [[ "${CMUX_FAKE_REATTACH_MODE:-success}" != "success" ]]; then
+      printf 'reattach refused\n' >&2
+      exit 1
+    fi
+    printf '{"entry":{"agent":"%s","target":"%s","state":"active"}}\n' "$agent" "$target"
+    ;;
   retire-session)
     agents=""
     while [[ $# -gt 0 ]]; do
@@ -598,8 +632,9 @@ grep -Fq $'surface:27\tenter' "$key_log"
 grep -Fq 'demo-project' "$create_log"
 grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
 [[ ! -s "$close_log" ]]
-[[ ! -s "$keepalive_log" ]]
-[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+grep -Fq $'reattach\tcodex\tcmux:surface:11111111-1111-4111-8111-111111111111' "$event_log"
+grep -Fq $'reattach\tclaude\tcmux:surface:22222222-2222-4222-8222-222222222222' "$event_log"
 
 # --no-start (ad-hoc) mode: workspace + rename, but NO $start//start sends.
 : >"$send_log"
@@ -633,7 +668,39 @@ fi
 grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
 grep -Fq 'no /start sent' "$stdout_log"
 [[ ! -s "$close_log" ]]
-[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+
+# Exact wake attachment is a launch gate: preserve the live workspace, expose
+# queued-message safety, and send neither rename nor start prompts on failure.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_REATTACH_MODE=refuse \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'failed exact wake attachment unexpectedly launched\n' >&2
+  exit 1
+fi
+grep -Fq 'Messages remain queued; no start prompts were sent' "$tmp_dir/stderr.log"
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$close_log" ]]
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
 
 # If Codex leaves the confirmation footer active after the first name Enter,
 # send exactly one additional Enter, observe the success marker, and continue.
@@ -666,11 +733,11 @@ if grep -Fq 'start demo-project' "$send_log"; then
   printf 'missed-enter rename test unexpectedly sent a start prompt\n' >&2
   exit 1
 fi
-[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ ! -s "$close_log" ]]
 
 # An existing mailbox is reused without listing or reading its backlog. Managed
-# SessionStart wake attachment owns the prelaunch baseline for each agent.
+# Launcher-side exact-surface attachment owns the prelaunch baseline for each agent.
 : >"$send_log"
 : >"$key_log"
 : >"$event_log"
@@ -692,7 +759,7 @@ CMUX_FAKE_SEND_LOG="$send_log" \
     $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
 
 grep -Fxq 'demo-project' "$create_log"
-[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 rm -rf "$fake_amq_root/demo-project"
 
 # If the naming dialog vanishes without a success marker, stop before either
@@ -729,10 +796,7 @@ if grep -Fq 'start demo-project' "$send_log"; then
   printf 'start prompt was sent without a Codex rename success marker\n' >&2
   exit 1
 fi
-if grep -Fq $'reattach\t' "$event_log"; then
-  printf 'wake was reattached without a Codex rename success marker\n' >&2
-  exit 1
-fi
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ ! -s "$close_log" ]]
 
 # A stale modal transcript must not trigger a blind retry if the active footer
@@ -769,10 +833,7 @@ if grep -Fq 'start demo-project' "$send_log"; then
   printf 'start prompt was sent after a stale rename modal\n' >&2
   exit 1
 fi
-if grep -Fq $'reattach\t' "$event_log"; then
-  printf 'wake was reattached after a stale rename modal\n' >&2
-  exit 1
-fi
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ ! -s "$close_log" ]]
 
 # A missing Codex rename-success marker after the confirmation Enter must also
@@ -808,10 +869,7 @@ if grep -Fq 'start demo-project' "$send_log"; then
   printf 'start prompt was sent after an unconfirmed Codex rename\n' >&2
   exit 1
 fi
-if grep -Fq $'reattach\t' "$event_log"; then
-  printf 'wake was reattached after an unconfirmed Codex rename\n' >&2
-  exit 1
-fi
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ ! -s "$close_log" ]]
 
 : >"$send_log"
@@ -1471,9 +1529,8 @@ grep -Fq 'Launched demo-project in workspace:10 using AMQ session demo-project-3
 [[ ! -s "$close_log" ]]
 rm -rf "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
 
-# SessionStart may attach either wake before launcher readiness fails. After
-# closing a failed workspace, cleanup therefore retires both identities without
-# guessing which hook completed.
+# Failed-workspace cleanup remains conservative and retires both identities
+# without guessing whether any partial attachment occurred.
 : >"$send_log"
 : >"$key_log"
 : >"$event_log"

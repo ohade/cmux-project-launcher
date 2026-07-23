@@ -36,7 +36,7 @@ Environment:
                                   keep a failed cmux workspace for debugging
   CMUX_PROJECT_LAUNCHER_AMQ_ROOT  AMQ base root for session allocation
   CMUX_PROJECT_LAUNCHER_AMQ       AMQ CLI path for session allocation
-  CMUX_PROJECT_LAUNCHER_KEEPALIVE amq-keepalive path for safe stale-wake retirement
+  CMUX_PROJECT_LAUNCHER_KEEPALIVE amq-keepalive path for exact attach and safe retirement
   CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS
                                   colon-separated AMQ paths or dirs for GUI PATH fallback
   CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT
@@ -151,10 +151,9 @@ cleanup_failed_workspace() {
     if ! close_output="$("$cmux_bin" workspace close "$workspace_ref" 2>&1)"; then
       echo "Failed to close unsuccessful cmux workspace $workspace_ref: $close_output" >&2
     else
-      # Deferred SessionStart hooks may already have attached either agent's
-      # wake before launcher-side readiness or naming fails. Retirement is
-      # identity-safe and fail-closed, so always attempt both after the failed
-      # workspace has been closed instead of guessing which hook succeeded.
+      # Retirement is identity-safe and fail-closed, so conservatively attempt
+      # both identities after a failed workspace has been closed rather than
+      # infer partial attachment from the failure phase.
       if [[ -n "${amq_session:-}" ]]; then
         cleanup_agents="codex,claude"
         retire_amq_session "$amq_session" "$cleanup_agents" || \
@@ -502,9 +501,12 @@ project, amq_session, workspace_root, codex_launcher, claude_launcher = sys.argv
 # equivalent boot flag; it is renamed post-boot.
 def launch_inner(launcher, extra_args=""):
     env = {
-        # Capture the unread floor before exec; SessionStart owns exact-surface
-        # attachment and readiness verification once the TUI has started.
+        # Capture the unread floor before exec. The launcher owns exact-surface
+        # attachment after cmux reports both surface IDs; early SessionStart
+        # hooks race cmux setup and Codex's cmux hook injection replaces its
+        # global SessionStart hooks.
         "AMQ_COOP_WAKE_FLAG": "--defer-wake",
+        "AMQ_KEEPALIVE_DISABLED": "1",
     }
     prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     command = f"{prefix} {shlex.quote(launcher)} {shlex.quote(amq_session)}"
@@ -546,6 +548,7 @@ if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
   exit 0
 fi
 
+launch_started_epoch="$(date +%s)"
 created=$("$cmux_bin" workspace create \
   --name "$project" \
   --description "Project launcher: $project (AMQ session: $amq_session)" \
@@ -663,6 +666,66 @@ wait_agent_ready() {
   wait_for_surface_text "$surface" "$ready_regex"
 }
 
+latest_launch_baseline() {
+  local agent="$1"
+  local agent_dir="$amq_base_root/$amq_session/agents/$agent"
+  /usr/bin/python3 - "$agent_dir" "$launch_started_epoch" <<'PY'
+import glob
+import os
+import sys
+
+agent_dir = os.path.realpath(os.path.expanduser(sys.argv[1]))
+minimum_mtime = float(sys.argv[2]) - 2.0
+candidates = []
+for path in glob.glob(os.path.join(agent_dir, ".wake-baseline-*.json")):
+    real = os.path.realpath(path)
+    try:
+        stat = os.stat(real)
+    except OSError:
+        continue
+    if not os.path.isfile(real):
+        continue
+    if os.path.dirname(real) != agent_dir or stat.st_mtime < minimum_mtime:
+        continue
+    candidates.append((stat.st_mtime_ns, real))
+if not candidates:
+    sys.exit(1)
+print(max(candidates)[1])
+PY
+}
+
+attach_exact_wake() {
+  local agent="$1"
+  local surface_id="$2"
+  local baseline_file
+  local attach_output
+  if [[ ! -x "$keepalive_bin" ]]; then
+    echo "AMQ wake unavailable for $agent: helper is not executable: $keepalive_bin" >&2
+    return 1
+  fi
+  if ! baseline_file="$(latest_launch_baseline "$agent")"; then
+    echo "AMQ wake unavailable for $agent: no baseline was captured by this launch." >&2
+    return 1
+  fi
+  if ! attach_output="$(
+    "$keepalive_bin" reattach \
+      --adapter cmux \
+      --target "cmux:surface:$surface_id" \
+      --root "$amq_base_root/$amq_session" \
+      --base-root "$amq_base_root" \
+      --session "$amq_session" \
+      --me "$agent" \
+      --amq "$amq_bin" \
+      --self "$keepalive_bin" \
+      --baseline-file "$baseline_file" \
+      --wake-ready-timeout 10s 2>&1
+  )"; then
+    echo "AMQ wake unavailable for $agent on cmux surface $surface_id: $attach_output" >&2
+    return 1
+  fi
+  return 0
+}
+
 # In --no-start (ad-hoc) mode the scratch workspace is the deliverable, so once its
 # surfaces resolve we keep it regardless of any later readiness/rename outcome.
 if [[ "$no_start" -eq 1 ]]; then
@@ -681,6 +744,15 @@ if [[ "$no_start" -ne 1 ]]; then
   fi
   if [[ "$claude_ready" -ne 1 ]]; then
     agent_readiness_error "Claude surface $claude_surface did not obtain a live runtime or show a recognized Claude banner."
+    exit 1
+  fi
+fi
+
+if [[ "$codex_ready" -eq 1 && "$claude_ready" -eq 1 ]]; then
+  if ! attach_exact_wake codex "$codex_surface_id" || \
+     ! attach_exact_wake claude "$claude_surface_id"; then
+    launch_ok=1
+    echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed. Messages remain queued; no start prompts were sent." >&2
     exit 1
   fi
 fi
