@@ -23,9 +23,9 @@ Create-project flow:
 - Launches a project workspace with Codex and Claude panes.
 - Names the underlying Claude conversation `claude-<session>` at boot and
   confirms Codex's `codex-<session>` rename before sending either start prompt.
-- Leaves every pre-existing AMQ message unread by capturing its exact unread
-  floor before each agent starts; messages arriving during startup remain
-  eligible for notification.
+- Leaves every pre-existing AMQ message unread. After exact wake attachment and
+  the Codex naming handshake, it checks unread metadata and emits a fixed
+  message-independent backlog doorbell when needed.
 - Defers AMQ wake startup until cmux reports both exact surface UUIDs, then has
   the launcher attach and verify each notifier before sending any work.
 - Identifies launcher workspaces by their structured project metadata, so an
@@ -50,17 +50,17 @@ Create-project flow:
   `/Applications/cmux.app/Contents/Resources/bin/cmux` or via
   `CMUX_PROJECT_LAUNCHER_CMUX`. Version 0.64.20 contains the upstream Codex
   YOLO/danger-mode restore fixes required by these workspaces.
-- AMQ CLI installed with `coop exec --defer-wake` and `wake --baseline-file`
-  support. The launcher prefers explicit paths and common install locations
-  before falling back to `PATH`.
+- AMQ 0.47 or newer with `coop exec --no-wake`, plus the current
+  `amq-keepalive reattach` exact-target interface. The launcher prefers
+  explicit paths and common install locations before falling back to `PATH`.
 - Local shell launchers for normal project launch:
   - `amq_codex <session>` for Codex.
   - `amq_claude <session> -- <agent-arguments>` for Claude. Inside cmux it must
     execute the per-surface `CMUX_CLAUDE_WRAPPER_SHIM`, not a bare Claude
     binary, so cmux can record a resumable Claude session.
-  - Both launchers must honor `AMQ_COOP_WAKE_FLAG=--defer-wake`. AMQ captures
-    the prelaunch unread floor; the project launcher then attaches and verifies
-    each exact surface before rename or start prompts.
+  - Both launchers must honor `AMQ_COOP_WAKE_FLAG=--no-wake`. The project
+    launcher starts the agent TUI first, then attaches and verifies each exact
+    production cmux surface before rename or start prompts.
   - Any Claude SessionStart hook that emits `sessionTitle` must preserve an
     explicit `--name` from the cmux launch metadata; otherwise it will replace
     the launcher's `claude-<session>` name immediately after boot.
@@ -175,10 +175,10 @@ bin/cmux-project-create --mode create \
   the mailbox and reuses the original room name; any missing helper, ambiguous
   probe, target mismatch, or ownership race preserves the old room and falls
   back to a suffixed session.
-- Reusing an existing mailbox never lists or reads its backlog. Safety comes
-  from AMQ's exact prelaunch unread-floor manifest plus launcher-owned
-  exact-surface attachment, not from mutating queue state or manufacturing
-  delivery receipts.
+- Reusing an existing mailbox lists only unread queue metadata after both exact
+  wakes attach; it never reads message bodies or mutates queue state. A
+  non-empty queue receives one fixed, message-independent backlog doorbell on
+  its exact agent surface.
 - Prompts are sent only after live terminal runtime and agent readiness checks.
   Existing workspaces are considered healthy only when each structured agent
   surface has both an exact AMQ wake target and the expected live process on
@@ -189,14 +189,15 @@ bin/cmux-project-create --mode create \
   dialog and name remain visible.
 - Prompt submission is confirmed through current visible cmux output; read
   failures are treated as failures, not success.
-- Fresh agents boot with `AMQ_COOP_WAKE_FLAG=--defer-wake` and suppress the
-  generic SessionStart attachment for this launch. AMQ captures an exact
-  unread-floor manifest before exec; after both agents are ready, the launcher
-  attaches each exact UUID surface with that manifest and requires
-  `notifier_live` before rename or start prompts. Attachment failure preserves
-  the live workspace, sends no work, and displays “messages remain queued.”
-  If an earlier launcher check fails and the new workspace is closed, cleanup
-  attempts identity-safe retirement for both agent wakes.
+- Fresh agents boot with `AMQ_COOP_WAKE_FLAG=--no-wake` and suppress the
+  generic SessionStart attachment for this launch. After both agents are ready,
+  the launcher attaches each exact UUID surface through `amq-keepalive`, checks
+  each unread queue after Codex naming, and emits only a fixed backlog doorbell
+  when needed before start prompts. Attachment, backlog inspection, or
+  doorbell failure preserves the live workspace, sends no project work, and
+  displays “messages remain queued.” If an earlier launcher check fails and
+  the new workspace is closed, cleanup attempts identity-safe retirement for
+  both agent wakes.
 - Create success requires both a progress-file content change and a new local
   update commit after the scaffold baseline.
 - Temporary create/draft files are written under Application Support with
@@ -215,7 +216,7 @@ Tests/CmuxProjectLauncherShellTests/test-bash32-compat.sh
 The shell fixtures use fake cmux, AMQ, keepalive, Claude, and progress helpers.
 They cover launch routing, metadata-based project reattach, duplicate-workspace
 prevention, exact-room stale-wake retirement, backlog preservation without
-AMQ reads, fail-closed AMQ/cmux state, deferred exact-surface wake attachment,
+AMQ body reads, fail-closed AMQ/cmux state, post-start exact-surface wake attachment,
 prompt submission, create-project gates, and Bash 3.2 compatibility.
 
 ## License

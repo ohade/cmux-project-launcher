@@ -501,11 +501,11 @@ project, amq_session, workspace_root, codex_launcher, claude_launcher = sys.argv
 # equivalent boot flag; it is renamed post-boot.
 def launch_inner(launcher, extra_args=""):
     env = {
-        # Capture the unread floor before exec. The launcher owns exact-surface
-        # attachment after cmux reports both surface IDs; early SessionStart
-        # hooks race cmux setup and Codex's cmux hook injection replaces its
-        # global SessionStart hooks.
-        "AMQ_COOP_WAKE_FLAG": "--defer-wake",
+        # AMQ 0.47 binds wakes to a live owner and no longer supports deferred
+        # wake manifests. The launcher disables the early SessionStart hook,
+        # starts each TUI with no wake, then attaches both exact surface UUIDs
+        # after cmux reports that the agent runtimes are live.
+        "AMQ_COOP_WAKE_FLAG": "--no-wake",
         "AMQ_KEEPALIVE_DISABLED": "1",
     }
     prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
@@ -548,7 +548,6 @@ if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
   exit 0
 fi
 
-launch_started_epoch="$(date +%s)"
 created=$("$cmux_bin" workspace create \
   --name "$project" \
   --description "Project launcher: $project (AMQ session: $amq_session)" \
@@ -625,7 +624,7 @@ AMQ session: $amq_session
 Codex surface: $codex_surface, expected screen regex: $codex_ready_regex
 Claude surface: $claude_surface, expected screen regex: $claude_ready_regex
 
-If a screen dump below shows only zsh, inspect the deferred-wake boot command.
+If a screen dump below shows only zsh, inspect the --no-wake boot command.
 A visible agent banner instead indicates a readiness-regex
 or startup-timing mismatch, not a failed wake registration.
 Close stale cmux workspaces or restart cmux, then try again.
@@ -666,45 +665,12 @@ wait_agent_ready() {
   wait_for_surface_text "$surface" "$ready_regex"
 }
 
-latest_launch_baseline() {
-  local agent="$1"
-  local agent_dir="$amq_base_root/$amq_session/agents/$agent"
-  /usr/bin/python3 - "$agent_dir" "$launch_started_epoch" <<'PY'
-import glob
-import os
-import sys
-
-agent_dir = os.path.realpath(os.path.expanduser(sys.argv[1]))
-minimum_mtime = float(sys.argv[2]) - 2.0
-candidates = []
-for path in glob.glob(os.path.join(agent_dir, ".wake-baseline-*.json")):
-    real = os.path.realpath(path)
-    try:
-        stat = os.stat(real)
-    except OSError:
-        continue
-    if not os.path.isfile(real):
-        continue
-    if os.path.dirname(real) != agent_dir or stat.st_mtime < minimum_mtime:
-        continue
-    candidates.append((stat.st_mtime_ns, real))
-if not candidates:
-    sys.exit(1)
-print(max(candidates)[1])
-PY
-}
-
 attach_exact_wake() {
   local agent="$1"
   local surface_id="$2"
-  local baseline_file
   local attach_output
   if [[ ! -x "$keepalive_bin" ]]; then
     echo "AMQ wake unavailable for $agent: helper is not executable: $keepalive_bin" >&2
-    return 1
-  fi
-  if ! baseline_file="$(latest_launch_baseline "$agent")"; then
-    echo "AMQ wake unavailable for $agent: no baseline was captured by this launch." >&2
     return 1
   fi
   if ! attach_output="$(
@@ -717,10 +683,44 @@ attach_exact_wake() {
       --me "$agent" \
       --amq "$amq_bin" \
       --self "$keepalive_bin" \
-      --baseline-file "$baseline_file" \
       --wake-ready-timeout 10s 2>&1
   )"; then
     echo "AMQ wake unavailable for $agent on cmux surface $surface_id: $attach_output" >&2
+    return 1
+  fi
+  return 0
+}
+
+notify_existing_backlog() {
+  local agent="$1"
+  local surface_id="$2"
+  local unread_json
+  local unread_count
+  local payload="[AMQ] Unread messages are queued. Run: amq drain --include-body"
+
+  if ! unread_json="$(
+    "$amq_bin" list \
+      --root "$amq_base_root/$amq_session" \
+      --me "$agent" \
+      --new \
+      --limit 1 \
+      --json 2>>"$diagnostics_log"
+  )"; then
+    echo "AMQ backlog inspection failed for $agent after exact wake attachment. Messages remain queued." >&2
+    return 1
+  fi
+  if ! unread_count="$(
+    printf '%s' "$unread_json" |
+      /usr/bin/python3 -c 'import json, sys; value = json.load(sys.stdin); assert isinstance(value, list); print(len(value))'
+  )"; then
+    echo "AMQ backlog inspection returned invalid JSON for $agent. Messages remain queued." >&2
+    return 1
+  fi
+  if [[ "$unread_count" -eq 0 ]]; then
+    return 0
+  fi
+  if ! "$keepalive_bin" inject cmux "cmux:surface:$surface_id" "$payload" >>"$diagnostics_log" 2>&1; then
+    echo "AMQ backlog doorbell failed for $agent on cmux surface $surface_id. Messages remain queued." >&2
     return 1
   fi
   return 0
@@ -760,18 +760,35 @@ fi
 # Name the Codex thread post-boot. Claude was named at boot via
 # `claude --name claude-<session>` in the layout, so it needs no post-boot rename.
 codex_renamed=0
+codex_rename_failed=0
 if [[ "$codex_ready" -eq 1 ]]; then
   if rename_thread "$codex_surface" "codex-$amq_session" codex; then
     codex_renamed=1
   elif [[ "$no_start" -ne 1 ]]; then
     launch_ok=1
     echo "Workspace $workspace_ref is live, but Codex did not confirm the name codex-$amq_session. No start prompts were sent." >&2
-    exit 1
+    codex_rename_failed=1
   else
     echo "Could not confirm the Codex thread was renamed to codex-$amq_session; preserving the ad-hoc workspace." >&2
   fi
 else
   echo "Skipping Codex rename because its surface did not become ready." >&2
+fi
+
+# Surface queued work only after the Codex naming handshake is finished. An
+# earlier doorbell can be consumed as rename input and leave both operations in
+# an ambiguous state.
+if [[ "$codex_ready" -eq 1 && "$claude_ready" -eq 1 ]]; then
+  if ! notify_existing_backlog codex "$codex_surface_id" || \
+     ! notify_existing_backlog claude "$claude_surface_id"; then
+    launch_ok=1
+    echo "Workspace $workspace_ref is live, but queued AMQ messages could not be surfaced. No start prompts were sent." >&2
+    exit 1
+  fi
+fi
+
+if [[ "$codex_rename_failed" -eq 1 ]]; then
+  exit 1
 fi
 
 if [[ "$no_start" -eq 1 ]]; then

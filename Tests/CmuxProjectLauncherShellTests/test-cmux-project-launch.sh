@@ -89,8 +89,8 @@ case "$cmd" in
         [[ "$description" == "Project launcher: $expected_project (AMQ session: $expected_session)" ]]
         [[ "$layout" == *"amq_codex $expected_session"* ]]
         [[ "$layout" == *"amq_claude $expected_session"* ]]
-        [[ "$layout" == *"AMQ_COOP_WAKE_FLAG=--defer-wake"* ]]
-        [[ "$layout" != *"AMQ_COOP_WAKE_FLAG=--no-wake"* ]]
+        [[ "$layout" == *"AMQ_COOP_WAKE_FLAG=--no-wake"* ]]
+        [[ "$layout" != *"AMQ_COOP_WAKE_FLAG=--defer-wake"* ]]
         [[ "$layout" == *"AMQ_KEEPALIVE_DISABLED=1"* ]]
         [[ "$layout" != *"AMQ_KEEPALIVE_BIN="* ]]
         # Claude is named at boot via `--name claude-<session>` forwarded through amq_claude.
@@ -103,8 +103,6 @@ case "$cmd" in
         [[ "$layout" != *"--require-wake"* ]]
         mkdir -p "${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/codex"
         mkdir -p "${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/claude"
-        printf '{}\n' >"${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/codex/.wake-baseline-launch.json"
-        printf '{}\n' >"${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/claude/.wake-baseline-launch.json"
         printf '%s\n' "$expected_session" >>"${CMUX_FAKE_CREATE_LOG:?}"
         printf 'OK workspace:10\n'
         ;;
@@ -438,6 +436,41 @@ JSON
 {"base_root":"$CMUX_FAKE_AMQ_ROOT","root":"$CMUX_FAKE_AMQ_ROOT"}
 JSON
     ;;
+  list)
+    if [[ "${CMUX_FAKE_AMQ_LIST_MODE:-success}" != "success" ]]; then
+      printf 'list failed\n' >&2
+      exit 70
+    fi
+    agent=""
+    limit=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --me)
+          agent="${2:?missing agent}"
+          shift 2
+          ;;
+        --limit)
+          limit="${2:?missing limit}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    [[ "$limit" == "1" ]]
+    printf 'list\t%s\n' "$agent" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    case "$agent" in
+      codex) unread="${CMUX_FAKE_UNREAD_CODEX:-0}" ;;
+      claude) unread="${CMUX_FAKE_UNREAD_CLAUDE:-0}" ;;
+      *) exit 64 ;;
+    esac
+    if [[ "$unread" -eq 0 ]]; then
+      printf '[]\n'
+    else
+      printf '[{"id":"fixture-unread"}]\n'
+    fi
+    ;;
   wake)
     sleep 120
     ;;
@@ -545,7 +578,6 @@ case "$command" in
   reattach)
     agent=""
     target=""
-    baseline=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --me)
@@ -557,20 +589,30 @@ case "$command" in
           shift 2
           ;;
         --baseline-file)
-          baseline="${2:?missing baseline}"
-          shift 2
+          printf 'removed --baseline-file argument was used\n' >&2
+          exit 65
           ;;
         *)
           shift
           ;;
       esac
     done
-    printf 'reattach\t%s\t%s\t%s\n' "$agent" "$target" "$baseline" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    printf 'reattach\t%s\t%s\n' "$agent" "$target" >>"${CMUX_FAKE_EVENT_LOG:?}"
     if [[ "${CMUX_FAKE_REATTACH_MODE:-success}" != "success" ]]; then
       printf 'reattach refused\n' >&2
       exit 1
     fi
     printf '{"entry":{"agent":"%s","target":"%s","state":"active"}}\n' "$agent" "$target"
+    ;;
+  inject)
+    adapter="${1:?missing adapter}"
+    target="${2:?missing target}"
+    payload="${3:?missing payload}"
+    printf 'inject\t%s\t%s\t%s\n' "$adapter" "$target" "$payload" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    if [[ "${CMUX_FAKE_INJECT_MODE:-success}" != "success" ]]; then
+      printf 'inject refused\n' >&2
+      exit 1
+    fi
     ;;
   retire-session)
     agents=""
@@ -601,6 +643,12 @@ SH
 chmod +x "$fake_keepalive"
 export CMUX_PROJECT_LAUNCHER_KEEPALIVE="$fake_keepalive"
 export CMUX_FAKE_KEEPALIVE_LOG="$keepalive_log"
+# Fail closed at fixture scope: even a test case that accidentally omits one
+# inline override must never reach the production cmux, AMQ, or open binaries.
+export CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux"
+export CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq"
+export CMUX_PROJECT_LAUNCHER_OPEN="$fake_open"
+export CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root"
 
 CMUX_FAKE_SEND_LOG="$send_log" \
 CMUX_FAKE_KEY_LOG="$key_log" \
@@ -736,8 +784,8 @@ fi
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ ! -s "$close_log" ]]
 
-# An existing mailbox is reused without listing or reading its backlog. Managed
-# Launcher-side exact-surface attachment owns the prelaunch baseline for each agent.
+# An existing mailbox is reused. After both exact-surface wakes are attached,
+# the launcher checks each unread queue without reading message bodies.
 : >"$send_log"
 : >"$key_log"
 : >"$event_log"
@@ -760,6 +808,117 @@ CMUX_FAKE_SEND_LOG="$send_log" \
 
 grep -Fxq 'demo-project' "$create_log"
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+[[ "$(awk -F '\t' '$1 == "list" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+[[ "$(awk -F '\t' '$1 == "inject" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+rm -rf "$fake_amq_root/demo-project"
+
+# Existing unread messages produce one fixed, message-independent doorbell per
+# agent after both exact wakes attach and the Codex rename handshake, but before
+# any start input.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$close_log"
+CMUX_FAKE_UNREAD_CODEX=1 \
+  CMUX_FAKE_UNREAD_CLAUDE=1 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+[[ "$(awk -F '\t' '$1 == "list" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+[[ "$(awk -F '\t' '$1 == "inject" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+grep -Fxq $'inject\tcmux\tcmux:surface:11111111-1111-4111-8111-111111111111\t[AMQ] Unread messages are queued. Run: amq drain --include-body' "$event_log"
+grep -Fxq $'inject\tcmux\tcmux:surface:22222222-2222-4222-8222-222222222222\t[AMQ] Unread messages are queued. Run: amq drain --include-body' "$event_log"
+last_reattach_line="$(awk -F '\t' '$1 == "reattach" { line=NR } END { print line + 0 }' "$event_log")"
+first_inject_line="$(awk -F '\t' '$1 == "inject" { print NR; exit }' "$event_log")"
+first_send_line="$(awk -F '\t' '$1 == "send" { print NR; exit }' "$event_log")"
+first_start_line="$(awk -F '\t' '$1 == "send" && ($3 == "$start demo-project" || $3 == "/start demo-project") { print NR; exit }' "$event_log")"
+[[ "$last_reattach_line" -lt "$first_send_line" ]]
+[[ "$first_send_line" -lt "$first_inject_line" ]]
+[[ "$first_inject_line" -lt "$first_start_line" ]]
+rm -rf "$fake_amq_root/demo-project"
+
+# If unread inspection fails, preserve the live workspace for inspection but
+# fail after naming and before any start input can hide the queued-work
+# uncertainty.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$close_log"
+if CMUX_FAKE_AMQ_LIST_MODE=error \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'backlog inspection failure unexpectedly launched successfully\n' >&2
+  exit 1
+fi
+grep -Fq 'AMQ backlog inspection failed for codex after exact wake attachment' "$tmp_dir/stderr.log"
+grep -Fq 'queued AMQ messages could not be surfaced. No start prompts were sent.' "$tmp_dir/stderr.log"
+grep -Fq $'surface:26\t/rename' "$send_log"
+grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'backlog inspection failure unexpectedly sent a start prompt\n' >&2
+  exit 1
+fi
+[[ ! -s "$close_log" ]]
+rm -rf "$fake_amq_root/demo-project"
+
+# A failed exact-surface backlog injection is equally fail-visible and stops
+# after naming and before start.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$close_log"
+if CMUX_FAKE_UNREAD_CODEX=1 \
+  CMUX_FAKE_INJECT_MODE=refuse \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'backlog injection failure unexpectedly launched successfully\n' >&2
+  exit 1
+fi
+grep -Fq 'AMQ backlog doorbell failed for codex' "$tmp_dir/stderr.log"
+grep -Fq $'surface:26\t/rename' "$send_log"
+grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'backlog injection failure unexpectedly sent a start prompt\n' >&2
+  exit 1
+fi
+[[ ! -s "$close_log" ]]
 rm -rf "$fake_amq_root/demo-project"
 
 # If the naming dialog vanishes without a success marker, stop before either
@@ -901,9 +1060,9 @@ fi
 grep -Fq 'demo-project' "$create_log"
 grep -Fq 'workspace:10' "$close_log"
 grep -Fq 'Refusing to send' "$tmp_dir/stderr.log"
-grep -Fq 'deferred-wake boot command' "$tmp_dir/stderr.log"
+grep -Fq -- '--no-wake boot command' "$tmp_dir/stderr.log"
 grep -Fq 'Refusing to send' "$diagnostics_log"
-grep -Fq 'deferred-wake boot command' "$diagnostics_log"
+grep -Fq -- '--no-wake boot command' "$diagnostics_log"
 [[ "$(stat -f '%Lp' "$diagnostics_log")" == "600" ]]
 
 : >"$send_log"
