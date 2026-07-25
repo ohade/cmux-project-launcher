@@ -308,12 +308,18 @@ JSON
             printf 'Name thread\n> %s\nPress enter to confirm\n> ordinary prompt\n' "$rename_name"
           elif [[ "$rename_mode" == "missed-enter" || "$rename_mode" == "no-success" ]]; then
             printf 'Name thread\n> %s\nPress enter to confirm\n' "$rename_name"
+          elif [[ "$rename_mode" == "wrapped-success" ]]; then
+            printf 'Session renamed to %s\n%s. To resume this session run codex resume %s\n> \n' \
+              "${rename_name%-*}-" "${rename_name##*-}" "$rename_name"
           else
             printf 'Session renamed to %s. To resume this session run codex resume %s\n> \n' "$rename_name" "$rename_name"
           fi
         elif [[ "$send_count" -eq 2 ]]; then
           if [[ "$rename_mode" == "no-success" ]]; then
             printf 'Name thread\n> %s\nPress enter to confirm\n' "$rename_name"
+          elif [[ "$rename_mode" == "wrapped-success" ]]; then
+            printf 'Session renamed to %s\n%s. To resume this session run codex resume %s\n> \n' \
+              "${rename_name%-*}-" "${rename_name##*-}" "$rename_name"
           else
             printf 'Session renamed to %s. To resume this session run codex resume %s\n> \n' "$rename_name" "$rename_name"
           fi
@@ -717,6 +723,36 @@ grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
 grep -Fq 'no /start sent' "$stdout_log"
 [[ ! -s "$close_log" ]]
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+
+# A long Codex name can soft-wrap inside cmux's read-screen output. The exact
+# success marker must still confirm the rename and allow the normal launch.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_RENAME_MODE=wrapped-success \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log"
+
+grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
+grep -Fq $'surface:26\t$start demo-project' "$send_log"
+grep -Fq $'surface:27\t/start demo-project' "$send_log"
+grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
+[[ ! -s "$close_log" ]]
 
 # Exact wake attachment is a launch gate: preserve the live workspace, expose
 # queued-message safety, and send neither rename nor start prompts on failure.

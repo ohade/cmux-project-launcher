@@ -967,6 +967,21 @@ rename_dialog_is_active() {
     && [[ "$last_nonblank" == *"Press enter to confirm"* ]]
 }
 
+count_rename_success_markers() {
+  local text="$1"
+  local name="$2"
+  # cmux read-screen returns terminal soft wraps as newlines. Long generated
+  # names can therefore split the otherwise exact Codex success marker across
+  # rows (for example, "codex-project-\n20260725"). Collapse display rows only
+  # for this literal marker count; the stronger before/after count below still
+  # prevents stale success text from proving a new rename.
+  printf '%s\n' "$text" |
+    tr -d '\r\n' |
+    { grep -Fo -- "Session renamed to $name" || true; } |
+    wc -l |
+    tr -d '[:space:]'
+}
+
 rename_thread() {
   local surface="$1"
   local name="$2"
@@ -994,7 +1009,7 @@ rename_thread() {
     echo "Could not inspect the $agent rename dialog before confirming '$name'." >&2
     return 1
   fi
-  baseline_successes="$(grep -Fc -- "Session renamed to $name" <<<"$text" || true)"
+  baseline_successes="$(count_rename_success_markers "$text" "$name" || true)"
   sleep "$enter_delay_seconds"
   for ((attempt = 1; attempt <= enter_retries; attempt++)); do
     "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" enter >/dev/null
@@ -1004,7 +1019,7 @@ rename_thread() {
         echo "Could not inspect the $agent rename result for '$name'." >&2
         return 1
       fi
-      successes="$(grep -Fc -- "Session renamed to $name" <<<"$text" || true)"
+      successes="$(count_rename_success_markers "$text" "$name" || true)"
       if [[ "$successes" -gt "$baseline_successes" ]]; then
         return 0
       fi
