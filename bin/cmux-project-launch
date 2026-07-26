@@ -137,6 +137,10 @@ setup_diagnostics_log() {
 }
 
 setup_diagnostics_log
+if ! resolve_amq_bin; then
+  echo "AMQ CLI resolution failed before workspace creation. Requested: ${CMUX_PROJECT_LAUNCHER_AMQ:-amq}; hints: ${CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS:-<none>}; PATH: $PATH. Set CMUX_PROJECT_LAUNCHER_AMQ to an executable path or configure CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS." >&2
+  exit 1
+fi
 workspace_root="$(expand_path "$workspace_root")"
 validate_launcher_word "$codex_launcher" "CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER"
 validate_launcher_word "$claude_launcher" "CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER"

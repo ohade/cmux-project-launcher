@@ -194,13 +194,15 @@ amq_candidate_paths() {
   local hints="${CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS:-}"
   local old_ifs="$IFS"
   local hint
+  local expanded_hint
   IFS=:
   for hint in $hints; do
     [[ -z "$hint" ]] && continue
-    if [[ -d "$hint" ]]; then
-      printf '%s\n' "$hint/amq"
+    expanded_hint="$(expand_path "$hint")" || continue
+    if [[ -d "$expanded_hint" ]]; then
+      printf '%s\n' "$expanded_hint/amq"
     else
-      printf '%s\n' "$hint"
+      printf '%s\n' "$expanded_hint"
     fi
   done
   IFS="$old_ifs"
@@ -217,24 +219,33 @@ PATHS
 resolve_amq_bin() {
   local found
   local candidate
+  local normalized
   if [[ -z "${amq_bin:-}" ]]; then
     amq_bin="amq"
   fi
   if [[ "$amq_bin" == */* ]]; then
-    [[ -x "$amq_bin" ]]
-    return $?
+    normalized="$(expand_path "$amq_bin")" || return 1
+    [[ "$normalized" == /* && -x "$normalized" ]] || return 1
+    amq_bin="$normalized"
+    return 0
   fi
 
   while IFS= read -r candidate; do
-    if [[ -x "$candidate" ]]; then
-      amq_bin="$candidate"
+    normalized="$(expand_path "$candidate")" || continue
+    if [[ "$normalized" == /* && -x "$normalized" ]]; then
+      amq_bin="$normalized"
       return 0
     fi
   done < <(amq_candidate_paths)
 
   found="$(command -v "$amq_bin" 2>/dev/null || true)"
-  if [[ -n "$found" && -x "$found" ]]; then
-    amq_bin="$found"
+  if [[ -n "$found" && "$found" == */* ]]; then
+    normalized="$(expand_path "$found")" || return 1
+  else
+    normalized=""
+  fi
+  if [[ "$normalized" == /* && -x "$normalized" ]]; then
+    amq_bin="$normalized"
     return 0
   fi
 

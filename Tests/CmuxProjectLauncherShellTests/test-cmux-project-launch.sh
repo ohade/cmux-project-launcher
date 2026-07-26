@@ -584,6 +584,7 @@ case "$command" in
   reattach)
     agent=""
     target=""
+    amq_path=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --me)
@@ -592,6 +593,10 @@ case "$command" in
           ;;
         --target)
           target="${2:?missing target}"
+          shift 2
+          ;;
+        --amq)
+          amq_path="${2:?missing AMQ path}"
           shift 2
           ;;
         --baseline-file)
@@ -603,7 +608,11 @@ case "$command" in
           ;;
       esac
     done
-    printf 'reattach\t%s\t%s\n' "$agent" "$target" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    if [[ "$amq_path" != /* || ! -x "$amq_path" ]]; then
+      printf 'exec: "%s": executable file not found in $PATH\n' "${amq_path:-amq}" >&2
+      exit 1
+    fi
+    printf 'reattach\t%s\t%s\t%s\n' "$agent" "$target" "$amq_path" >>"${CMUX_FAKE_EVENT_LOG:?}"
     if [[ "${CMUX_FAKE_REATTACH_MODE:-success}" != "success" ]]; then
       printf 'reattach refused\n' >&2
       exit 1
@@ -723,6 +732,94 @@ grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
 grep -Fq 'no /start sent' "$stdout_log"
 [[ ! -s "$close_log" ]]
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+
+# A GUI-launched app has no Homebrew directory on PATH. The launcher must resolve
+# AMQ from a relative path hint before the base-root command substitution,
+# normalize it, and pass the absolute executable to amq-keepalive.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+resolved_fake_amq="$(cd "$tmp_dir" && /bin/pwd -P)/amq"
+if ! (
+  cd "$tmp_dir" || exit 1
+  # Empty means honor the script shebang.
+  # shellcheck disable=SC2086
+  /usr/bin/env -u CMUX_PROJECT_LAUNCHER_AMQ -u CMUX_PROJECT_LAUNCHER_AMQ_ROOT \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS=. \
+    CMUX_FAKE_SEND_LOG="$send_log" \
+    CMUX_FAKE_KEY_LOG="$key_log" \
+    CMUX_FAKE_CREATE_LOG="$create_log" \
+    CMUX_FAKE_SELECT_LOG="$select_log" \
+    CMUX_FAKE_OPEN_LOG="$open_log" \
+    CMUX_FAKE_CLOSE_LOG="$close_log" \
+    CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+    CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+    CMUX_PROJECT_LAUNCHER_KEEPALIVE="$fake_keepalive" \
+    CMUX_PROJECT_LAUNCHER_PS="$fake_ps" \
+    CMUX_PROJECT_LAUNCHER_POLL=1 \
+    CMUX_PROJECT_LAUNCHER_WAIT=0 \
+      $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+); then
+  printf 'GUI-PATH launch failed to resolve the hinted AMQ executable\n' >&2
+  exit 1
+fi
+grep -Fq $'reattach\tcodex\tcmux:surface:11111111-1111-4111-8111-111111111111\t'"$resolved_fake_amq" "$event_log"
+grep -Fq $'reattach\tclaude\tcmux:surface:22222222-2222-4222-8222-222222222222\t'"$resolved_fake_amq" "$event_log"
+grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
+[[ ! -s "$close_log" ]]
+
+# The explicit-path branch expands `~` before checking executability and keeps
+# the same absolute-path postcondition as hinted discovery.
+(
+  HOME="$tmp_dir"
+  # Intentional literal verifies expand_path handles a config value containing `~`.
+  # shellcheck disable=SC2088
+  amq_bin='~/amq'
+  # shellcheck source=bin/lib/cmux-project-common.sh
+  source "$repo_root/bin/lib/cmux-project-common.sh"
+  resolve_amq_bin
+  [[ "$amq_bin" == "$fake_amq" ]]
+)
+
+# A bad explicit path must fail before cmux creates a workspace, and the error
+# must preserve the requested value plus the configured search context.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+missing_amq="$tmp_dir/missing-amq"
+if /usr/bin/env \
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  CMUX_PROJECT_LAUNCHER_AMQ="$missing_amq" \
+  CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS="$tmp_dir/missing-hint" \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_KEEPALIVE="$fake_keepalive" \
+  CMUX_PROJECT_LAUNCHER_PS="$fake_ps" \
+    "$repo_root/bin/cmux-project-launch" --no-start demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'missing AMQ unexpectedly reached the launch path\n' >&2
+  exit 1
+fi
+grep -Fq "Requested: $missing_amq" "$tmp_dir/stderr.log"
+grep -Fq "hints: $tmp_dir/missing-hint" "$tmp_dir/stderr.log"
+grep -Fq 'PATH: /usr/bin:/bin:/usr/sbin:/sbin' "$tmp_dir/stderr.log"
+[[ ! -s "$create_log" ]]
+[[ ! -s "$event_log" ]]
+[[ ! -s "$close_log" ]]
 
 # A long Codex name can soft-wrap inside cmux's read-screen output. The exact
 # success marker must still confirm the rename and allow the normal launch.

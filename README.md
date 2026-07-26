@@ -103,13 +103,17 @@ so scope either override to one command unless changing both modes is intended.
 
 Additional overrides:
 
-- `CMUX_PROJECT_LAUNCHER_AMQ`: AMQ executable path.
+- `CMUX_PROJECT_LAUNCHER_AMQ`: AMQ executable path. Relative and `~`-prefixed
+  values are normalized before use.
 - `CMUX_PROJECT_LAUNCHER_AMQ_ROOT`: AMQ base root.
 - `CMUX_PROJECT_LAUNCHER_KEEPALIVE`: `amq-keepalive` executable used for
   exact-surface attachment and identity-verified stale-wake retirement.
   Defaults to `~/bin/amq-keepalive`.
 - `CMUX_PROJECT_LAUNCHER_AMQ_PATH_HINTS`: colon-separated AMQ paths or dirs for
-  GUI-launched environments.
+  GUI-launched environments. Relative hints resolve from the launcher's working
+  directory. The launcher resolves AMQ to an absolute executable before creating
+  a workspace and fails early with the requested value, hints, and effective
+  `PATH` when no executable can be selected.
 - `CMUX_PROJECT_LAUNCHER_START_PRECOMPUTE`: project-list helper.
 - `CMUX_PROJECT_LAUNCHER_COMMIT_PROGRESS`: progress commit helper.
 - `CMUX_PROJECT_LAUNCHER_PROGRESS_REPO`: git repo that owns progress files.
