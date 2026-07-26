@@ -293,14 +293,48 @@ public struct CmuxLauncher: Sendable {
             _ = semaphore.wait(timeout: .now() + 5)
             throw CmuxLauncherError.commandTimedOut(executablePath: executablePath, arguments: arguments)
         }
-        stdoutCollector.append(stdout.fileHandleForReading.readDataToEndOfFile())
-        stderrCollector.append(stderr.fileHandleForReading.readDataToEndOfFile())
+        // Never read to end-of-file here. The launched script registers long-lived `amq wake`
+        // daemons that inherit these pipe write ends and outlive the script, so end-of-file
+        // never arrives and a read that waits for it hangs the caller forever (the Ad-hoc
+        // spinner spun indefinitely because of this). Stop the async handlers, then drain
+        // whatever is already buffered without waiting for any remaining writer to close.
+        stdout.fileHandleForReading.readabilityHandler = nil
+        stderr.fileHandleForReading.readabilityHandler = nil
+        Self.drainAvailableWithoutWaitingForWriters(stdout.fileHandleForReading, into: stdoutCollector)
+        Self.drainAvailableWithoutWaitingForWriters(stderr.fileHandleForReading, into: stderrCollector)
         let out = stdoutCollector.string()
         let err = stderrCollector.string()
         guard process.terminationStatus == 0 else {
             throw CmuxLauncherError.commandFailed(executablePath: executablePath, arguments: arguments, output: out, error: err)
         }
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Drain data already buffered in a pipe without waiting for its writers to close.
+    ///
+    /// `readDataToEndOfFile()` blocks until every process holding the write end closes it, which
+    /// never happens when a launched script leaves daemons behind. Switching the descriptor to
+    /// non-blocking mode and reading until `EAGAIN` bounds the read by what is available now.
+    private static func drainAvailableWithoutWaitingForWriters(
+        _ handle: FileHandle,
+        into collector: ProcessOutputCollector
+    ) {
+        let descriptor = handle.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags != -1, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != -1 else { return }
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let bytesRead = buffer.withUnsafeMutableBytes { raw -> Int in
+                read(descriptor, raw.baseAddress, raw.count)
+            }
+            if bytesRead > 0 {
+                collector.append(Data(buffer.prefix(bytesRead)))
+                continue
+            }
+            if bytesRead == 0 { return }
+            if errno == EINTR { continue }
+            return
+        }
     }
 
     private static func commandTimeout() -> TimeInterval {

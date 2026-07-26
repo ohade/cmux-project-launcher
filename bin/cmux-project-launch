@@ -444,14 +444,15 @@ retire_amq_session() {
       "$keepalive_bin" "$session_root" "$agents" "$amq_bin" "$keepalive_bin"
     return 0
   fi
-  if retire_output="$(
+  # Same pipe-free capture as attach_exact_wake: retirement can converge on wakes whose daemons
+  # hold an inherited descriptor, and a substitution pipe would block on end-of-file.
+  if capture_command_output retire_output \
     "$keepalive_bin" retire-session \
       --root "$session_root" \
       --agents "$agents" \
       --adapter cmux \
       --amq "$amq_bin" \
-      --self "$keepalive_bin" 2>&1
-  )"; then
+      --self "$keepalive_bin"; then
     return 0
   fi
   echo "Safe AMQ retirement refused for $session: $retire_output" >&2
@@ -677,7 +678,10 @@ attach_exact_wake() {
     echo "AMQ wake unavailable for $agent: helper is not executable: $keepalive_bin" >&2
     return 1
   fi
-  if ! attach_output="$(
+  # Capture through a file, not command substitution: the wake daemon this registers keeps an
+  # inherited pipe descriptor open for the session's lifetime, so a substitution pipe here never
+  # reaches end-of-file and the launcher hangs after an otherwise successful launch.
+  if ! capture_command_output attach_output \
     "$keepalive_bin" reattach \
       --adapter cmux \
       --target "cmux:surface:$surface_id" \
@@ -687,8 +691,7 @@ attach_exact_wake() {
       --me "$agent" \
       --amq "$amq_bin" \
       --self "$keepalive_bin" \
-      --wake-ready-timeout 10s 2>&1
-  )"; then
+      --wake-ready-timeout 10s; then
     echo "AMQ wake unavailable for $agent on cmux surface $surface_id: $attach_output" >&2
     return 1
   fi
