@@ -4,17 +4,19 @@
 # Run a command and capture its combined output into the named variable, without waiting for any
 # surviving child to close its descriptors.
 #
-# `amq wake` daemonizes stdin/stdout/stderr to /dev/null but keeps an inherited pipe descriptor
+# `amq wake` daemonizes stdin/stdout/stderr to /dev/null but can keep other inherited descriptors
 # open for the life of the session. Command substitution reads its pipe until end-of-file, which
 # only arrives once every writer closes, so `output="$(cmd)"` hangs forever once such a daemon is
-# registered. Capturing through a regular file removes the pipe entirely: a leaked descriptor to a
-# file cannot block the caller. Returns the command's exit status.
+# registered. Capturing through a regular file removes the ordinary output pipe. Explicitly close
+# diagnostics fd 3 as well: callers can map it to their own captured stderr pipe, and a wake daemon
+# retaining that writer would make an outer `subprocess.run(capture_output=True)` hang after this
+# launcher has otherwise finished. Returns the command's exit status.
 capture_command_output() {
   local __capture_var="$1"
   shift
   local __capture_file __capture_status
   __capture_file="$(mktemp "${TMPDIR:-/tmp}/cmux-project-capture.XXXXXX")" || return 1
-  if "$@" >"$__capture_file" 2>&1; then
+  if "$@" 3>&- >"$__capture_file" 2>&1; then
     __capture_status=0
   else
     __capture_status=$?

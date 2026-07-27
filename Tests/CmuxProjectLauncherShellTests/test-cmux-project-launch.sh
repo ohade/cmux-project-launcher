@@ -24,6 +24,7 @@ keepalive_log="$tmp_dir/keepalive.log"
 event_log="$tmp_dir/event.log"
 stdout_log="$tmp_dir/stdout.log"
 diagnostics_log="$tmp_dir/launcher.log"
+descriptor_pid_log="$tmp_dir/descriptor-daemon.pids"
 background_pids=()
 mkdir -p "$fake_amq_root"
 export CMUX_PROJECT_LAUNCHER_LOG="$diagnostics_log"
@@ -39,9 +40,51 @@ cleanup() {
   if [[ "${#background_pids[@]}" -gt 0 ]]; then
     kill "${background_pids[@]}" 2>/dev/null || true
   fi
+  if [[ -f "$descriptor_pid_log" ]]; then
+    while IFS= read -r pid; do
+      [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" 2>/dev/null || true
+    done <"$descriptor_pid_log"
+  fi
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
+
+# An outer process can capture the launcher's stderr while the launcher duplicates
+# that pipe to diagnostics fd 3. A long-lived wake descendant must not inherit fd 3,
+# or the outer process waits forever for EOF even after the launcher exits.
+descriptor_helper="$tmp_dir/descriptor-helper"
+descriptor_probe="$tmp_dir/descriptor-probe"
+cat >"$descriptor_helper" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+sleep 45 &
+printf '%s\n' "$!" >>"${CMUX_FAKE_DESCRIPTOR_PID_LOG:?}"
+printf 'wake-attached\n'
+SH
+chmod +x "$descriptor_helper"
+cat >"$descriptor_probe" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+source "$repo_root/bin/lib/cmux-project-common.sh"
+exec 3>&2
+capture_command_output result "$descriptor_helper"
+printf '%s\n' "\$result"
+SH
+chmod +x "$descriptor_probe"
+CMUX_FAKE_DESCRIPTOR_PID_LOG="$descriptor_pid_log" \
+  /usr/bin/python3 - "$descriptor_probe" <<'PY'
+import subprocess
+import sys
+
+completed = subprocess.run(
+    [sys.argv[1]],
+    capture_output=True,
+    text=True,
+    timeout=5,
+    check=True,
+)
+assert completed.stdout.strip() == "wake-attached", completed
+PY
 
 cat >"$fake_cmux" <<'SH'
 #!/usr/bin/env bash
