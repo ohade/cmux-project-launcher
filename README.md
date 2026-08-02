@@ -195,7 +195,9 @@ bin/cmux-project-create --mode create \
   failures are treated as failures, not success.
 - Fresh agents boot with `AMQ_COOP_WAKE_FLAG=--no-wake` and suppress the
   generic SessionStart attachment for this launch. After both agents are ready,
-  the launcher attaches each exact UUID surface through `amq-keepalive`, checks
+  the launcher removes its own inherited `AMQ_WAKE_OWNER` and attaches each
+  exact UUID surface through `amq-keepalive` as a launcher-managed wake in a
+  detached OS session, checks
   each unread queue after Codex naming, and emits only a fixed backlog doorbell
   when needed before start prompts. Attachment, backlog inspection, or
   doorbell failure preserves the live workspace, sends no project work, and

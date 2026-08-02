@@ -682,7 +682,7 @@ attach_exact_wake() {
   # inherited pipe descriptor open for the session's lifetime, so a substitution pipe here never
   # reaches end-of-file and the launcher hangs after an otherwise successful launch.
   if ! capture_command_output attach_output \
-    "$keepalive_bin" reattach \
+    /usr/bin/env -u AMQ_WAKE_OWNER "$keepalive_bin" reattach \
       --adapter cmux \
       --target "cmux:surface:$surface_id" \
       --root "$amq_base_root/$amq_session" \

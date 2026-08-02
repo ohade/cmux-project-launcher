@@ -625,6 +625,10 @@ command="${1:?missing command}"
 shift
 case "$command" in
   reattach)
+    if [[ -n "${AMQ_WAKE_OWNER+x}" ]]; then
+      printf 'reattach inherited caller AMQ_WAKE_OWNER\n' >&2
+      exit 88
+    fi
     agent=""
     target=""
     amq_path=""
@@ -701,6 +705,7 @@ SH
 chmod +x "$fake_keepalive"
 export CMUX_PROJECT_LAUNCHER_KEEPALIVE="$fake_keepalive"
 export CMUX_FAKE_KEEPALIVE_LOG="$keepalive_log"
+export AMQ_WAKE_OWNER='launcher-caller-owner-must-not-cross-attach-boundary'
 # Fail closed at fixture scope: even a test case that accidentally omits one
 # inline override must never reach the production cmux, AMQ, or open binaries.
 export CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux"
