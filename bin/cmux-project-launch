@@ -699,6 +699,9 @@ attach_exact_wake() {
     echo "AMQ wake unavailable for $agent on cmux surface $surface_id: $attach_output" >&2
     return 1
   fi
+  if [[ "$attach_output" == *"warning:"* ]]; then
+    echo "AMQ wake attachment warning for $agent on cmux surface $surface_id: $attach_output" >&2
+  fi
   return 0
 }
 
@@ -760,8 +763,17 @@ if [[ "$no_start" -ne 1 ]]; then
 fi
 
 if [[ "$codex_ready" -eq 1 && "$claude_ready" -eq 1 ]]; then
-  if ! attach_exact_wake codex "$codex_surface_id" || \
-     ! attach_exact_wake claude "$claude_surface_id"; then
+  if ! attach_exact_wake codex "$codex_surface_id"; then
+    launch_ok=1
+    echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed. Messages remain queued; no start prompts were sent." >&2
+    exit 1
+  fi
+  if ! attach_exact_wake claude "$claude_surface_id"; then
+    # Codex was already baselined. Surface its pre-existing queue before
+    # exiting so a one-sided attach failure cannot suppress that backlog.
+    if ! notify_existing_backlog codex "$codex_surface_id"; then
+      echo "Codex wake attached, but its queued AMQ messages could not be surfaced after Claude attachment failed." >&2
+    fi
     launch_ok=1
     echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed. Messages remain queued; no start prompts were sent." >&2
     exit 1

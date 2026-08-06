@@ -660,10 +660,27 @@ case "$command" in
       exit 1
     fi
     printf 'reattach\t%s\t%s\t%s\n' "$agent" "$target" "$amq_path" >>"${CMUX_FAKE_EVENT_LOG:?}"
-    if [[ "${CMUX_FAKE_REATTACH_MODE:-success}" != "success" ]]; then
-      printf 'reattach refused\n' >&2
-      exit 1
-    fi
+    case "${CMUX_FAKE_REATTACH_MODE:-success}" in
+      success)
+        ;;
+      refuse)
+        printf 'reattach refused\n' >&2
+        exit 1
+        ;;
+      refuse-claude)
+        if [[ "$agent" == "claude" ]]; then
+          printf 'reattach refused for claude\n' >&2
+          exit 1
+        fi
+        ;;
+      warn-reuse)
+        printf 'warning: reusing existing amq wake; this launch did not re-baseline it\n' >&2
+        ;;
+      *)
+        printf 'unknown fake reattach mode\n' >&2
+        exit 64
+        ;;
+    esac
     printf '{"entry":{"agent":"%s","target":"%s","state":"active"}}\n' "$agent" "$target"
     ;;
   inject)
@@ -931,6 +948,41 @@ grep -Fq 'Messages remain queued; no start prompts were sent' "$tmp_dir/stderr.l
 [[ ! -s "$close_log" ]]
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
 
+# If the second attachment fails, the first wake has already baselined its
+# queue. Surface that agent's existing backlog before exiting, without sending
+# a rename or start prompt.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_REATTACH_MODE=refuse-claude \
+  CMUX_FAKE_UNREAD_CODEX=1 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'partial exact wake attachment unexpectedly launched\n' >&2
+  exit 1
+fi
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+grep -Fxq $'inject\tcmux\tcmux:surface:11111111-1111-4111-8111-111111111111\t[AMQ] Unread messages are queued. Run: amq drain --include-body' "$event_log"
+[[ "$(awk -F '\t' '$1 == "inject" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$close_log" ]]
+
 # If Codex leaves the confirmation footer active after the first name Enter,
 # send exactly one additional Enter, observe the success marker, and continue.
 : >"$send_log"
@@ -974,7 +1026,8 @@ fi
 : >"$close_log"
 : >"$keepalive_log"
 mkdir -p "$fake_amq_root/demo-project"
-CMUX_FAKE_SEND_LOG="$send_log" \
+CMUX_FAKE_REATTACH_MODE=warn-reuse \
+  CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
   CMUX_FAKE_CREATE_LOG="$create_log" \
   CMUX_FAKE_SELECT_LOG="$select_log" \
@@ -993,6 +1046,8 @@ grep -Fxq 'demo-project' "$create_log"
 [[ "$(grep -Fxc -- '--baseline-existing' "$keepalive_log")" -eq 2 ]]
 [[ "$(awk -F '\t' '$1 == "list" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ "$(awk -F '\t' '$1 == "inject" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+grep -Fq 'AMQ wake attachment warning for codex' "$tmp_dir/stderr.log"
+grep -Fq 'this launch did not re-baseline it' "$tmp_dir/stderr.log"
 rm -rf "$fake_amq_root/demo-project"
 
 # Existing unread messages produce one fixed, message-independent doorbell per
