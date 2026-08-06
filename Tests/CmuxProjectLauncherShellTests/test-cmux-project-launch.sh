@@ -972,6 +972,7 @@ fi
 : >"$event_log"
 : >"$create_log"
 : >"$close_log"
+: >"$keepalive_log"
 mkdir -p "$fake_amq_root/demo-project"
 CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
@@ -989,6 +990,7 @@ CMUX_FAKE_SEND_LOG="$send_log" \
 
 grep -Fxq 'demo-project' "$create_log"
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+[[ "$(grep -Fxc -- '--baseline-existing' "$keepalive_log")" -eq 2 ]]
 [[ "$(awk -F '\t' '$1 == "list" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ "$(awk -F '\t' '$1 == "inject" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
 rm -rf "$fake_amq_root/demo-project"

@@ -681,6 +681,9 @@ attach_exact_wake() {
   # Capture through a file, not command substitution: the wake daemon this registers keeps an
   # inherited pipe descriptor open for the session's lifetime, so a substitution pipe here never
   # reaches end-of-file and the launcher hangs after an otherwise successful launch.
+  # 2026-08-06: a prequeued message proved that an unbaselined wake can inject its automatic
+  # doorbell before the Codex naming handshake. Baseline the startup cohort here; the explicit
+  # notify_existing_backlog step below emits exactly one doorbell after naming completes.
   if ! capture_command_output attach_output \
     /usr/bin/env -u AMQ_WAKE_OWNER "$keepalive_bin" reattach \
       --adapter cmux \
@@ -691,6 +694,7 @@ attach_exact_wake() {
       --me "$agent" \
       --amq "$amq_bin" \
       --self "$keepalive_bin" \
+      --baseline-existing \
       --wake-ready-timeout 10s; then
     echo "AMQ wake unavailable for $agent on cmux surface $surface_id: $attach_output" >&2
     return 1
