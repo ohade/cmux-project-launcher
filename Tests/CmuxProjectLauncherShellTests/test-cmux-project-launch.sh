@@ -629,6 +629,10 @@ case "$command" in
       printf 'reattach inherited caller AMQ_WAKE_OWNER\n' >&2
       exit 88
     fi
+    if [[ "${AMQ_KEEPALIVE_BASELINE_EXISTING:-}" != "1" ]]; then
+      printf 'reattach did not request startup backlog baselining\n' >&2
+      exit 89
+    fi
     agent=""
     target=""
     amq_path=""
@@ -659,7 +663,9 @@ case "$command" in
       printf 'exec: "%s": executable file not found in $PATH\n' "${amq_path:-amq}" >&2
       exit 1
     fi
-    printf 'reattach\t%s\t%s\t%s\n' "$agent" "$target" "$amq_path" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    printf 'reattach\t%s\t%s\t%s\t%s\n' \
+      "$agent" "$target" "$amq_path" "$AMQ_KEEPALIVE_BASELINE_EXISTING" \
+      >>"${CMUX_FAKE_EVENT_LOG:?}"
     case "${CMUX_FAKE_REATTACH_MODE:-success}" in
       success)
         ;;
@@ -1043,7 +1049,11 @@ CMUX_FAKE_REATTACH_MODE=warn-reuse \
 
 grep -Fxq 'demo-project' "$create_log"
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
-[[ "$(grep -Fxc -- '--baseline-existing' "$keepalive_log")" -eq 2 ]]
+[[ "$(awk -F '\t' '$1 == "reattach" && $5 == "1" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+if grep -Fxq -- '--baseline-existing' "$keepalive_log"; then
+  printf 'launcher passed unsupported keepalive reattach flag --baseline-existing\n' >&2
+  exit 1
+fi
 [[ "$(awk -F '\t' '$1 == "list" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 [[ "$(awk -F '\t' '$1 == "inject" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
 grep -Fq 'AMQ wake attachment warning for codex' "$tmp_dir/stderr.log"

@@ -685,7 +685,8 @@ attach_exact_wake() {
   # doorbell before the Codex naming handshake. Baseline the startup cohort here; the explicit
   # notify_existing_backlog step below emits exactly one doorbell after naming completes.
   if ! capture_command_output attach_output \
-    /usr/bin/env -u AMQ_WAKE_OWNER "$keepalive_bin" reattach \
+    /usr/bin/env -u AMQ_WAKE_OWNER AMQ_KEEPALIVE_BASELINE_EXISTING=1 \
+      "$keepalive_bin" reattach \
       --adapter cmux \
       --target "cmux:surface:$surface_id" \
       --root "$amq_base_root/$amq_session" \
@@ -694,7 +695,6 @@ attach_exact_wake() {
       --me "$agent" \
       --amq "$amq_bin" \
       --self "$keepalive_bin" \
-      --baseline-existing \
       --wake-ready-timeout 10s; then
     echo "AMQ wake unavailable for $agent on cmux surface $surface_id: $attach_output" >&2
     return 1
