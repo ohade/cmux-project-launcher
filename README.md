@@ -21,6 +21,8 @@ Create-project flow:
 - Lists active and archived projects from progress files.
 - Shows resume/history context from the project metadata and task-state file.
 - Launches a project workspace with Codex and Claude panes.
+- Initializes a new AMQ room and all three mailboxes before cmux starts either
+  agent, so wake readiness never races a partially created queue.
 - Names the underlying Claude conversation `claude-<session>` at boot and
   confirms Codex's `codex-<session>` rename before sending either start prompt.
 - Leaves every pre-existing AMQ message unread. After exact wake attachment and
@@ -168,6 +170,8 @@ bin/cmux-project-create --mode create \
 - Project names must start with an alphanumeric character and may contain only
   letters, digits, `.`, `_`, and `-`.
 - AMQ session allocation fails closed if AMQ state cannot be inspected.
+- A missing AMQ session config is initialized before workspace creation;
+  initialization failure leaves cmux untouched.
 - Existing AMQ/cmux state is reconciled before launch. Existing project
   workspaces are reopened from their structured description even when their
   AMQ room is suffixed; duplicate matches are reported and never auto-deleted.
@@ -222,8 +226,9 @@ Tests/CmuxProjectLauncherShellTests/test-bash32-compat.sh
 The shell fixtures use fake cmux, AMQ, keepalive, Claude, and progress helpers.
 They cover launch routing, metadata-based project reattach, duplicate-workspace
 prevention, exact-room stale-wake retirement, backlog preservation without
-AMQ body reads, fail-closed AMQ/cmux state, post-start exact-surface wake attachment,
-prompt submission, create-project gates, and Bash 3.2 compatibility.
+AMQ body reads, initialization ordering, fail-closed AMQ/cmux state, post-start
+exact-surface wake attachment, prompt submission, create-project gates, and
+Bash 3.2 compatibility.
 
 ## License
 

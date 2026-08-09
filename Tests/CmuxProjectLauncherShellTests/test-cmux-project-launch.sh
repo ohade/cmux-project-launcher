@@ -144,8 +144,7 @@ case "$cmd" in
         [[ "$layout" != *"coopcc $expected_session"* ]]
         [[ "$layout" != *"amq coop exec"* ]]
         [[ "$layout" != *"--require-wake"* ]]
-        mkdir -p "${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/codex"
-        mkdir -p "${CMUX_FAKE_AMQ_ROOT:?}/$expected_session/agents/claude"
+        printf 'workspace-create\t%s\n' "$expected_session" >>"${CMUX_FAKE_EVENT_LOG:?}"
         printf '%s\n' "$expected_session" >>"${CMUX_FAKE_CREATE_LOG:?}"
         printf 'OK workspace:10\n'
         ;;
@@ -485,6 +484,41 @@ JSON
 {"base_root":"$CMUX_FAKE_AMQ_ROOT","root":"$CMUX_FAKE_AMQ_ROOT"}
 JSON
     ;;
+  init)
+    if [[ "${CMUX_FAKE_AMQ_INIT_FAIL:-0}" == "1" ]]; then
+      printf 'fixture init failed\n' >&2
+      exit 71
+    fi
+    root=""
+    agents=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --root)
+          root="${2:?missing root}"
+          shift 2
+          ;;
+        --agents)
+          agents="${2:?missing agents}"
+          shift 2
+          ;;
+        *)
+          printf 'unexpected init argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+      esac
+    done
+    [[ -n "$root" ]]
+    [[ "$agents" == "claude,codex,user" ]]
+    mkdir -p "$root/meta"
+    printf '{"agents":["claude","codex","user"]}\n' >"$root/meta/config.json"
+    old_ifs="$IFS"
+    IFS=','
+    for agent in $agents; do
+      mkdir -p "$root/agents/$agent/inbox"
+    done
+    IFS="$old_ifs"
+    printf 'init\t%s\t%s\n' "$root" "$agents" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    ;;
   list)
     if [[ "${CMUX_FAKE_AMQ_LIST_MODE:-success}" != "success" ]]; then
       printf 'list failed\n' >&2
@@ -766,9 +800,46 @@ grep -Fq $'surface:27\tenter' "$key_log"
 grep -Fq 'demo-project' "$create_log"
 grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
 [[ ! -s "$close_log" ]]
+grep -Fxq $'init\t'"$fake_amq_root/demo-project"$'\tclaude,codex,user' "$event_log"
+[[ -f "$fake_amq_root/demo-project/meta/config.json" ]]
+[[ -d "$fake_amq_root/demo-project/agents/user/inbox" ]]
+init_line="$(awk -F '\t' '$1 == "init" { print NR; exit }' "$event_log")"
+workspace_create_line="$(awk -F '\t' '$1 == "workspace-create" { print NR; exit }' "$event_log")"
+[[ "$init_line" -lt "$workspace_create_line" ]]
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 grep -Fq $'reattach\tcodex\tcmux:surface:11111111-1111-4111-8111-111111111111' "$event_log"
 grep -Fq $'reattach\tclaude\tcmux:surface:22222222-2222-4222-8222-222222222222' "$event_log"
+
+# Session initialization is a launch gate. A failed init must not create a
+# workspace whose agents and wake registration would race an incomplete queue.
+: >"$event_log"
+: >"$create_log"
+rm -rf "$fake_amq_root/demo-project-init-fail"
+if CMUX_FAKE_AMQ_INIT_FAIL=1 \
+  CMUX_FAKE_EXPECT_PROJECT=demo-project-init-fail \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-init-fail \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-init-fail >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'failed AMQ init unexpectedly created a workspace\n' >&2
+  exit 1
+fi
+grep -Fq 'Could not initialize AMQ session demo-project-init-fail' "$tmp_dir/stderr.log"
+[[ ! -s "$create_log" ]]
+if grep -Fq $'workspace-create\t' "$event_log"; then
+  printf 'failed AMQ init reached cmux workspace creation\n' >&2
+  exit 1
+fi
 
 # --no-start (ad-hoc) mode: workspace + rename, but NO $start//start sends.
 : >"$send_log"

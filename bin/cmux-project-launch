@@ -481,6 +481,25 @@ allocate_amq_session() {
   printf '%s\n' "$candidate"
 }
 
+ensure_amq_session_initialized() {
+  local session="$1"
+  local session_root="$amq_base_root/$session"
+  local init_output=""
+
+  if [[ -f "$session_root/meta/config.json" ]]; then
+    return 0
+  fi
+  if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+    printf 'would initialize AMQ session: %q init --root %q --agents %q\n' \
+      "$amq_bin" "$session_root" "claude,codex,user"
+    return 0
+  fi
+  if ! init_output=$("$amq_bin" init --root "$session_root" --agents claude,codex,user 2>&1); then
+    echo "Could not initialize AMQ session $session at $session_root: $init_output" >&2
+    return 1
+  fi
+}
+
 if ! amq_base_root="$(resolve_amq_base_root)" || [[ -z "$amq_base_root" ]]; then
   echo "Could not resolve AMQ base root for session allocation." >&2
   exit 1
@@ -491,6 +510,9 @@ if ! amq_who_state="$(amq_who_json "$amq_base_root")"; then
 fi
 handle_existing_workspace_state
 amq_session="$(allocate_amq_session)"
+if ! ensure_amq_session_initialized "$amq_session"; then
+  exit 1
+fi
 
 layout=$(
   /usr/bin/python3 - "$project" "$amq_session" "$workspace_root" "$codex_launcher" "$claude_launcher" <<'PY'
