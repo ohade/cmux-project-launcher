@@ -117,6 +117,8 @@ diagnostics_log="${CMUX_PROJECT_LAUNCHER_LOG:-$HOME/Library/Logs/CmuxProjectLaun
 workspace_ref=""
 launch_ok=0
 reuse_project_session=0
+project_lock_file=""
+project_lock_acquired=0
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/lib/cmux-project-common.sh
@@ -146,6 +148,44 @@ validate_launcher_word "$codex_launcher" "CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER"
 validate_launcher_word "$claude_launcher" "CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER"
 keepalive_bin="$(expand_path "$keepalive_bin")"
 
+release_project_launch_lock() {
+  local recorded_pid=""
+  if [[ "$project_lock_acquired" -ne 1 || -z "$project_lock_file" ]]; then
+    return 0
+  fi
+  if [[ -f "$project_lock_file" ]]; then
+    recorded_pid="$(sed -n '1p' "$project_lock_file" 2>/dev/null || true)"
+    if [[ "$recorded_pid" == "$$" ]]; then
+      rm -f "$project_lock_file"
+    fi
+  fi
+  project_lock_acquired=0
+}
+
+acquire_project_launch_lock() {
+  local lock_dir="$amq_base_root/.cmux-project-launcher-locks"
+  if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+    return 0
+  fi
+  if [[ ! -x /usr/bin/shlock ]]; then
+    echo "Project launch serialization helper is unavailable: /usr/bin/shlock" >&2
+    return 1
+  fi
+  if ! mkdir -p "$lock_dir" || ! chmod 700 "$lock_dir"; then
+    echo "Could not prepare project launch lock directory: $lock_dir" >&2
+    return 1
+  fi
+  project_lock_file="$lock_dir/$project.lock"
+  # 2026-08-09: two launchers could both observe no config/workspace, initialize
+  # the same AMQ root, and create duplicate cmux workspaces. shlock atomically
+  # rejects the second launch and removes a stale lock whose PID is no longer live.
+  if ! /usr/bin/shlock -f "$project_lock_file" -p "$$"; then
+    echo "A cmux project launch for $project is already in progress; created nothing." >&2
+    return 1
+  fi
+  project_lock_acquired=1
+}
+
 cleanup_failed_workspace() {
   local status=$?
   local close_output=""
@@ -165,6 +205,7 @@ cleanup_failed_workspace() {
       fi
     fi
   fi
+  release_project_launch_lock
   exit "$status"
 }
 trap cleanup_failed_workspace EXIT
@@ -481,27 +522,92 @@ allocate_amq_session() {
   printf '%s\n' "$candidate"
 }
 
+amq_session_health() {
+  local session_root="$1"
+  local doctor_output=""
+  local doctor_status=0
+
+  if doctor_output=$("$amq_bin" doctor --root "$session_root" --json --json-schema=2 2>&1); then
+    :
+  else
+    doctor_status=$?
+    printf 'amq doctor command failed (exit %d): %s\n' "$doctor_status" "$doctor_output"
+    return 1
+  fi
+  /usr/bin/python3 -c '
+import json
+import sys
+
+try:
+    result = json.load(sys.stdin)
+except Exception as exc:
+    print(f"amq doctor returned invalid JSON: {exc}")
+    raise SystemExit(1)
+
+checks = {entry.get("name"): entry for entry in result.get("checks", [])}
+problems = []
+for name in ("Config", "Mailboxes"):
+    status = checks.get(name, {}).get("status")
+    if status != "ok":
+        message = checks.get(name, {}).get("message", "check missing")
+        display_status = status or "missing"
+        problems.append(f"{name}={display_status} ({message})")
+
+mailboxes = {entry.get("handle"): entry for entry in result.get("mailboxes", [])}
+for handle in ("claude", "codex"):
+    mailbox = mailboxes.get(handle)
+    if mailbox is None:
+        problems.append(f"required configured mailbox {handle} missing")
+        continue
+    if mailbox.get("provenance") not in ("configured", "configured_and_discovered"):
+        problems.append(f"required mailbox {handle} is not configured")
+    if mailbox.get("status") != "ok":
+        mailbox_status = mailbox.get("status", "missing")
+        problems.append(f"required mailbox {handle} status={mailbox_status}")
+
+if problems:
+    print("; ".join(problems))
+    raise SystemExit(1)
+' <<<"$doctor_output"
+}
+
 ensure_amq_session_initialized() {
   local session="$1"
   local session_root="$amq_base_root/$session"
   local init_output=""
+  local health_output=""
+  local init_status=0
 
   if [[ -f "$session_root/meta/config.json" ]]; then
-    return 0
+    if health_output=$(amq_session_health "$session_root"); then
+      return 0
+    fi
+    echo "AMQ session $session at $session_root failed read-only AMQ doctor validation; refusing to modify it or create a cmux workspace: $health_output" >&2
+    return 1
   fi
   if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
     printf 'would initialize AMQ session: %q init --root %q --agents %q\n' \
       "$amq_bin" "$session_root" "claude,codex,user"
     return 0
   fi
-  if ! init_output=$("$amq_bin" init --root "$session_root" --agents claude,codex,user 2>&1); then
-    echo "Could not initialize AMQ session $session at $session_root: $init_output" >&2
+  if init_output=$("$amq_bin" init --root "$session_root" --agents claude,codex,user 2>&1); then
+    :
+  else
+    init_status=$?
+    echo "Could not initialize AMQ session $session at $session_root (exit $init_status): $init_output" >&2
+    return 1
+  fi
+  if ! health_output=$(amq_session_health "$session_root"); then
+    echo "AMQ initialized session $session at $session_root but read-only AMQ doctor validation failed; refusing to create a cmux workspace: $health_output" >&2
     return 1
   fi
 }
 
 if ! amq_base_root="$(resolve_amq_base_root)" || [[ -z "$amq_base_root" ]]; then
   echo "Could not resolve AMQ base root for session allocation." >&2
+  exit 1
+fi
+if ! acquire_project_launch_lock; then
   exit 1
 fi
 if ! amq_who_state="$(amq_who_json "$amq_base_root")"; then

@@ -22,7 +22,11 @@ Create-project flow:
 - Shows resume/history context from the project metadata and task-state file.
 - Launches a project workspace with Codex and Claude panes.
 - Initializes a new AMQ room and all three mailboxes before cmux starts either
-  agent, so wake readiness never races a partially created queue.
+  agent. Existing configured rooms are left untouched only after AMQ's read-only
+  doctor validates the config and mailboxes; unhealthy rooms fail before cmux
+  creates a workspace.
+- Serializes launches of the same project, so concurrent invocations cannot
+  initialize the same room or create duplicate cmux workspaces.
 - Names the underlying Claude conversation `claude-<session>` at boot and
   confirms Codex's `codex-<session>` rename before sending either start prompt.
 - Leaves every pre-existing AMQ message unread. After exact wake attachment and

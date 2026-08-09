@@ -465,6 +465,7 @@ set -euo pipefail
 
 command="${1:?missing command}"
 shift
+original_args=("$@")
 case "$command" in
   who)
     if [[ "${CMUX_FAKE_AMQ_WHO_MODE:-empty}" == "demo-project-active" ]]; then
@@ -485,6 +486,12 @@ JSON
 JSON
     ;;
   init)
+    if [[ -n "${CMUX_FAKE_AMQ_INIT_ENTERED:-}" ]]; then
+      : >"$CMUX_FAKE_AMQ_INIT_ENTERED"
+      while [[ ! -f "${CMUX_FAKE_AMQ_INIT_RELEASE:?}" ]]; do
+        sleep 0.01
+      done
+    fi
     if [[ "${CMUX_FAKE_AMQ_INIT_FAIL:-0}" == "1" ]]; then
       printf 'fixture init failed\n' >&2
       exit 71
@@ -509,15 +516,89 @@ JSON
     done
     [[ -n "$root" ]]
     [[ "$agents" == "claude,codex,user" ]]
-    mkdir -p "$root/meta"
-    printf '{"agents":["claude","codex","user"]}\n' >"$root/meta/config.json"
-    old_ifs="$IFS"
-    IFS=','
-    for agent in $agents; do
-      mkdir -p "$root/agents/$agent/inbox"
-    done
-    IFS="$old_ifs"
+    if [[ -n "${CMUX_PROJECT_LAUNCHER_REAL_AMQ:-}" ]]; then
+      "$CMUX_PROJECT_LAUNCHER_REAL_AMQ" init "${original_args[@]}"
+    else
+      mkdir -p "$root/meta"
+      old_ifs="$IFS"
+      IFS=','
+      # Intentional splitting of the fixture's asserted comma-separated roster.
+      for agent in $agents; do
+        mkdir -p \
+          "$root/agents/$agent/inbox/tmp" \
+          "$root/agents/$agent/inbox/new" \
+          "$root/agents/$agent/inbox/cur" \
+          "$root/agents/$agent/outbox/sent" \
+          "$root/agents/$agent/dlq/tmp" \
+          "$root/agents/$agent/dlq/new" \
+          "$root/agents/$agent/dlq/cur" \
+          "$root/agents/$agent/receipts"
+      done
+      IFS="$old_ifs"
+      printf '{"agents":["claude","codex","user"]}\n' >"$root/meta/config.json"
+    fi
     printf 'init\t%s\t%s\n' "$root" "$agents" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    ;;
+  doctor)
+    root=""
+    json=0
+    schema=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --root)
+          root="${2:?missing root}"
+          shift 2
+          ;;
+        --json)
+          json=1
+          shift
+          ;;
+        --json-schema=2)
+          schema=2
+          shift
+          ;;
+        *)
+          printf 'unexpected doctor argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+      esac
+    done
+    [[ -n "$root" ]]
+    [[ "$json" -eq 1 ]]
+    [[ "$schema" -eq 2 ]]
+    printf 'doctor\t%s\n' "$root" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    if [[ -n "${CMUX_FAKE_AMQ_DOCTOR_EXIT:-}" ]]; then
+      exit "$CMUX_FAKE_AMQ_DOCTOR_EXIT"
+    fi
+    if [[ -n "${CMUX_PROJECT_LAUNCHER_REAL_AMQ:-}" ]]; then
+      exec "$CMUX_PROJECT_LAUNCHER_REAL_AMQ" doctor "${original_args[@]}"
+    fi
+    case "${CMUX_FAKE_AMQ_DOCTOR_MODE:-healthy}" in
+      healthy)
+        cat <<'JSON'
+{"checks":[{"name":"Config","status":"ok"},{"name":"Mailboxes","status":"ok"}],"mailboxes":[{"handle":"claude","provenance":"configured_and_discovered","status":"ok","issues":[]},{"handle":"codex","provenance":"configured_and_discovered","status":"ok","issues":[]},{"handle":"user","provenance":"configured_and_discovered","status":"ok","issues":[]}]}
+JSON
+        ;;
+      config-error)
+        cat <<'JSON'
+{"checks":[{"name":"Config","status":"error","message":"invalid config fixture"},{"name":"Mailboxes","status":"error","message":"invalid config fixture"}],"mailboxes":[]}
+JSON
+        ;;
+      mailboxes-error)
+        cat <<'JSON'
+{"checks":[{"name":"Config","status":"ok"},{"name":"Mailboxes","status":"error","message":"missing mailbox paths"}],"mailboxes":[{"handle":"claude","provenance":"configured_and_discovered","status":"error","issues":["missing:inbox/tmp"]}]}
+JSON
+        ;;
+      wrong-agent)
+        cat <<'JSON'
+{"checks":[{"name":"Config","status":"ok"},{"name":"Mailboxes","status":"ok"}],"mailboxes":[{"handle":"claude","provenance":"configured_and_discovered","status":"ok","issues":[]},{"handle":"user","provenance":"configured_and_discovered","status":"ok","issues":[]}]}
+JSON
+        ;;
+      *)
+        printf 'unknown fake doctor mode\n' >&2
+        exit 64
+        ;;
+    esac
     ;;
   list)
     if [[ "${CMUX_FAKE_AMQ_LIST_MODE:-success}" != "success" ]]; then
@@ -801,14 +882,89 @@ grep -Fq 'demo-project' "$create_log"
 grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
 [[ ! -s "$close_log" ]]
 grep -Fxq $'init\t'"$fake_amq_root/demo-project"$'\tclaude,codex,user' "$event_log"
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
 [[ -f "$fake_amq_root/demo-project/meta/config.json" ]]
-[[ -d "$fake_amq_root/demo-project/agents/user/inbox" ]]
+[[ -d "$fake_amq_root/demo-project/agents/user/inbox/new" ]]
 init_line="$(awk -F '\t' '$1 == "init" { print NR; exit }' "$event_log")"
+doctor_line="$(awk -F '\t' '$1 == "doctor" { print NR; exit }' "$event_log")"
 workspace_create_line="$(awk -F '\t' '$1 == "workspace-create" { print NR; exit }' "$event_log")"
 [[ "$init_line" -lt "$workspace_create_line" ]]
+[[ "$init_line" -lt "$doctor_line" ]]
+[[ "$doctor_line" -lt "$workspace_create_line" ]]
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
 grep -Fq $'reattach\tcodex\tcmux:surface:11111111-1111-4111-8111-111111111111' "$event_log"
 grep -Fq $'reattach\tclaude\tcmux:surface:22222222-2222-4222-8222-222222222222' "$event_log"
+
+# Project launch is one serialized transaction. Without the project lock, the
+# second invocation reaches AMQ init/workspace creation while the first is
+# paused after the same empty-state observation.
+concurrent_entered="$tmp_dir/concurrent-init-entered"
+concurrent_release="$tmp_dir/concurrent-init-release"
+concurrent_first_stdout="$tmp_dir/concurrent-first.stdout"
+concurrent_first_stderr="$tmp_dir/concurrent-first.stderr"
+concurrent_second_stdout="$tmp_dir/concurrent-second.stdout"
+concurrent_second_stderr="$tmp_dir/concurrent-second.stderr"
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+CMUX_FAKE_AMQ_INIT_ENTERED="$concurrent_entered" \
+CMUX_FAKE_AMQ_INIT_RELEASE="$concurrent_release" \
+CMUX_FAKE_EXPECT_PROJECT=demo-project-concurrent \
+CMUX_FAKE_EXPECT_SESSION=demo-project-concurrent \
+CMUX_FAKE_SEND_LOG="$send_log" \
+CMUX_FAKE_KEY_LOG="$key_log" \
+CMUX_FAKE_CREATE_LOG="$create_log" \
+CMUX_FAKE_SELECT_LOG="$select_log" \
+CMUX_FAKE_OPEN_LOG="$open_log" \
+CMUX_FAKE_CLOSE_LOG="$close_log" \
+CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+CMUX_PROJECT_LAUNCHER_POLL=1 \
+CMUX_PROJECT_LAUNCHER_WAIT=0 \
+  $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-concurrent \
+    >"$concurrent_first_stdout" 2>"$concurrent_first_stderr" &
+concurrent_pid=$!
+background_pids+=("$concurrent_pid")
+for _ in {1..200}; do
+  [[ -f "$concurrent_entered" ]] && break
+  sleep 0.01
+done
+if [[ ! -f "$concurrent_entered" ]]; then
+  printf 'first concurrent launcher did not reach blocked init\n' >&2
+  exit 1
+fi
+if CMUX_FAKE_EXPECT_PROJECT=demo-project-concurrent \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-concurrent \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-concurrent \
+      >"$concurrent_second_stdout" 2>"$concurrent_second_stderr"; then
+  printf 'second concurrent launcher was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'A cmux project launch for demo-project-concurrent is already in progress; created nothing.' "$concurrent_second_stderr"
+[[ ! -s "$create_log" ]]
+: >"$concurrent_release"
+if ! wait "$concurrent_pid"; then
+  printf 'first concurrent launcher failed after release\n' >&2
+  sed -n '1,240p' "$concurrent_first_stderr" >&2
+  exit 1
+fi
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+[[ "$(awk -F '\t' '$1 == "workspace-create" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
 
 # Session initialization is a launch gate. A failed init must not create a
 # workspace whose agents and wake registration would race an incomplete queue.
@@ -835,11 +991,195 @@ if CMUX_FAKE_AMQ_INIT_FAIL=1 \
   exit 1
 fi
 grep -Fq 'Could not initialize AMQ session demo-project-init-fail' "$tmp_dir/stderr.log"
+grep -Fq '(exit 71)' "$tmp_dir/stderr.log"
 [[ ! -s "$create_log" ]]
 if grep -Fq $'workspace-create\t' "$event_log"; then
   printf 'failed AMQ init reached cmux workspace creation\n' >&2
   exit 1
 fi
+
+# Preserve an AMQ doctor's exact exit status even when it emits no stderr.
+doctor_fail_root="$fake_amq_root/demo-project-doctor-fail"
+mkdir -p "$doctor_fail_root/meta"
+printf '{"agents":["claude","codex","user"]}\n' >"$doctor_fail_root/meta/config.json"
+: >"$event_log"
+: >"$create_log"
+if CMUX_FAKE_EXPECT_PROJECT=demo-project-doctor-fail \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-doctor-fail \
+  CMUX_FAKE_AMQ_DOCTOR_EXIT=72 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-doctor-fail \
+      >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'failed AMQ doctor unexpectedly launched\n' >&2
+  exit 1
+fi
+grep -Fq 'amq doctor command failed (exit 72)' "$tmp_dir/stderr.log"
+[[ ! -s "$create_log" ]]
+
+# A complete configured session is read-only input: launch without invoking
+# init again. This pins the configured-session no-op half of the contract.
+configured_root="$fake_amq_root/demo-project-configured"
+rm -rf "$configured_root"
+mkdir -p "$configured_root/meta"
+for agent in claude codex user; do
+  mkdir -p \
+    "$configured_root/agents/$agent/inbox/tmp" \
+    "$configured_root/agents/$agent/inbox/new" \
+    "$configured_root/agents/$agent/inbox/cur" \
+    "$configured_root/agents/$agent/outbox/sent" \
+    "$configured_root/agents/$agent/dlq/tmp" \
+    "$configured_root/agents/$agent/dlq/new" \
+    "$configured_root/agents/$agent/dlq/cur" \
+    "$configured_root/agents/$agent/receipts"
+done
+printf '{"agents":["claude","codex","user"]}\n' >"$configured_root/meta/config.json"
+chmod -R 700 "$configured_root"
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_EXPECT_PROJECT=demo-project-configured \
+CMUX_FAKE_EXPECT_SESSION=demo-project-configured \
+CMUX_FAKE_SEND_LOG="$send_log" \
+CMUX_FAKE_KEY_LOG="$key_log" \
+CMUX_FAKE_CREATE_LOG="$create_log" \
+CMUX_FAKE_SELECT_LOG="$select_log" \
+CMUX_FAKE_OPEN_LOG="$open_log" \
+CMUX_FAKE_CLOSE_LOG="$close_log" \
+CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+CMUX_PROJECT_LAUNCHER_POLL=1 \
+CMUX_PROJECT_LAUNCHER_WAIT=0 \
+  $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-configured >"$stdout_log"
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+grep -Fq $'workspace-create\tdemo-project-configured' "$event_log"
+[[ "$(awk -F '\t' '$1 == "doctor" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+
+# A configured but partial session must remain untouched and fail before cmux.
+partial_root="$fake_amq_root/demo-project-partial"
+rm -rf "$partial_root"
+mkdir -p "$partial_root/meta" "$partial_root/agents/claude/inbox/new"
+printf '{"agents":["claude","codex","user"]}\n' >"$partial_root/meta/config.json"
+: >"$event_log"
+: >"$create_log"
+if CMUX_FAKE_EXPECT_PROJECT=demo-project-partial \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-partial \
+  CMUX_FAKE_AMQ_DOCTOR_MODE=mailboxes-error \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-partial >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'partial configured AMQ session unexpectedly launched\n' >&2
+  exit 1
+fi
+grep -Fq 'failed read-only AMQ doctor validation' "$tmp_dir/stderr.log"
+grep -Fq 'Mailboxes=error' "$tmp_dir/stderr.log"
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ ! -s "$create_log" ]]
+if grep -Fq $'workspace-create\t' "$event_log"; then
+  printf 'partial configured AMQ session reached cmux workspace creation\n' >&2
+  exit 1
+fi
+
+# A malformed config is present state, not a new room: doctor must reject it
+# without init or cmux mutation.
+malformed_root="$fake_amq_root/demo-project-malformed"
+rm -rf "$malformed_root"
+mkdir -p "$malformed_root/meta"
+printf '{not-json\n' >"$malformed_root/meta/config.json"
+: >"$event_log"
+: >"$create_log"
+if CMUX_FAKE_EXPECT_PROJECT=demo-project-malformed \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-malformed \
+  CMUX_FAKE_AMQ_DOCTOR_MODE=config-error \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-malformed >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'malformed configured AMQ session unexpectedly launched\n' >&2
+  exit 1
+fi
+grep -Fq 'Config=error' "$tmp_dir/stderr.log"
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ ! -s "$create_log" ]]
+
+# A healthy room for a different roster is not usable by this two-agent
+# launcher. Require both launch agents to be configured, without mirroring the
+# rest of AMQ's mailbox layout in launcher code.
+wrong_agent_root="$fake_amq_root/demo-project-wrong-agent"
+rm -rf "$wrong_agent_root"
+mkdir -p "$wrong_agent_root/meta"
+for agent in claude user; do
+  mkdir -p \
+    "$wrong_agent_root/agents/$agent/inbox/tmp" \
+    "$wrong_agent_root/agents/$agent/inbox/new" \
+    "$wrong_agent_root/agents/$agent/inbox/cur" \
+    "$wrong_agent_root/agents/$agent/outbox/sent" \
+    "$wrong_agent_root/agents/$agent/dlq/tmp" \
+    "$wrong_agent_root/agents/$agent/dlq/new" \
+    "$wrong_agent_root/agents/$agent/dlq/cur" \
+    "$wrong_agent_root/agents/$agent/receipts"
+done
+printf '{"agents":["claude","user"]}\n' >"$wrong_agent_root/meta/config.json"
+chmod -R 700 "$wrong_agent_root"
+: >"$event_log"
+: >"$create_log"
+if CMUX_FAKE_EXPECT_PROJECT=demo-project-wrong-agent \
+  CMUX_FAKE_EXPECT_SESSION=demo-project-wrong-agent \
+  CMUX_FAKE_AMQ_DOCTOR_MODE=wrong-agent \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-wrong-agent >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'wrong-agent AMQ session unexpectedly launched\n' >&2
+  exit 1
+fi
+grep -Fq 'required configured mailbox codex missing' "$tmp_dir/stderr.log"
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ ! -s "$create_log" ]]
 
 # --no-start (ad-hoc) mode: workspace + rename, but NO $start//start sends.
 : >"$send_log"
