@@ -19,7 +19,7 @@ workspace on failure.
 Environment:
   CMUX_PROJECT_LAUNCHER_CMUX     cmux CLI path
   CMUX_PROJECT_LAUNCHER_WAIT     seconds to wait before post-boot sends (default: 8)
-  CMUX_PROJECT_LAUNCHER_POLL     seconds to poll read-screen before fallback (default: 45)
+  CMUX_PROJECT_LAUNCHER_POLL     seconds to poll read-screen before fallback (default: 150)
   CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX
                                   readiness regex for Codex read-screen polling
   CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX
@@ -938,6 +938,19 @@ else
   echo "Skipping Codex rename because its surface did not become ready." >&2
 fi
 
+# rename_thread dismisses the dialog on its own failure paths, but the modal can
+# render AFTER that check and leave Codex sitting on "Type a name and press Enter",
+# where it cannot receive an AMQ doorbell. Observed live 2026-09-08 as Gate 4 run C:
+# the launcher reported a naming warning and exited 0 with the pane still blocked.
+# Re-verify here, escape whatever is still open, and refuse to claim a clean launch
+# if the pane stays blocked.
+codex_pane_blocked=0
+if [[ "$codex_ready" -eq 1 && "$codex_renamed" -ne 1 ]]; then
+  if ! dismiss_rename_dialog "$codex_surface" codex "codex-$amq_session"; then
+    codex_pane_blocked=1
+  fi
+fi
+
 # Surface queued work only after the Codex naming handshake is finished. An
 # earlier doorbell can be consumed as rename input and leave both operations in
 # an ambiguous state.
@@ -948,6 +961,12 @@ if [[ "$codex_ready" -eq 1 && "$claude_ready" -eq 1 ]]; then
     echo "Workspace $workspace_ref is live, but queued AMQ messages could not be surfaced. No start prompts were sent." >&2
     exit 1
   fi
+fi
+
+if [[ "$codex_pane_blocked" -eq 1 ]]; then
+  launch_ok=1
+  echo "Codex is stuck in its rename dialog on $codex_surface and cannot receive AMQ messages; press escape in that pane. Preserving $workspace_ref." >&2
+  exit 1
 fi
 
 if [[ "$codex_rename_failed" -eq 1 ]]; then

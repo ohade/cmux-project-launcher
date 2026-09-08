@@ -1064,13 +1064,26 @@ dismiss_rename_dialog() {
   local name="${3:-}"
   local attempt
   local text
-  if ! text="$(read_surface_visible_text "$surface")"; then
-    echo "Could not inspect the $agent surface before dismissing the rename dialog." >&2
-    return 1
-  fi
-  if ! rename_modal_visible "$text" "$name"; then
-    return 0
-  fi
+  local settle_deadline
+  # A single modal-free read is NOT proof there is nothing to dismiss. The dialog
+  # can render AFTER open_rename_dialog gives up, so an immediate check returns 0,
+  # no Escape is ever sent, and the pane is left stuck on "Type a name and press
+  # Enter" — where it cannot receive an AMQ doorbell. Observed live 2026-09-08 as
+  # Gate 4 run C. Watch for a bounded window before calling the pane clean.
+  settle_deadline=$((SECONDS + submit_confirm_wait_seconds))
+  while true; do
+    if ! text="$(read_surface_visible_text "$surface")"; then
+      echo "Could not inspect the $agent surface before dismissing the rename dialog." >&2
+      return 1
+    fi
+    if rename_modal_visible "$text" "$name"; then
+      break
+    fi
+    if (( SECONDS >= settle_deadline )); then
+      return 0
+    fi
+    sleep 1
+  done
   for ((attempt = 1; attempt <= enter_retries; attempt++)); do
     "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" escape >/dev/null
     sleep "$enter_delay_seconds"

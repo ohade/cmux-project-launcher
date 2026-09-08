@@ -339,7 +339,22 @@ JSON
         elif [[ "$send_count" -eq 1 && "$key_count" -eq 0 ]]; then
           printf '> /rename\n'
         elif [[ "$send_count" -eq 1 ]]; then
-          if [[ "$rename_mode" == "no-modal" ]]; then
+          if [[ "$rename_mode" == "late-modal" ]]; then
+            # Observed live 2026-09-08 (Gate 4 run C): /rename is accepted but the
+            # modal renders AFTER open_rename_dialog gives up. dismiss_rename_dialog
+            # then reads a modal-free screen, concludes there is nothing to dismiss,
+            # and returns 0 without sending Escape. The modal appears a moment later
+            # and the Codex pane is stuck on "Type a name and press Enter" forever.
+            read_count_file="${CMUX_FAKE_SEND_LOG:?}.late-modal-reads"
+            read_count="$(cat "$read_count_file" 2>/dev/null || printf 0)"
+            read_count=$((read_count + 1))
+            printf '%s' "$read_count" >"$read_count_file"
+            if [[ "$read_count" -le 6 ]]; then
+              printf '> \n'
+            else
+              printf 'Name thread\nType a name and press Enter\n> \n'
+            fi
+          elif [[ "$rename_mode" == "no-modal" ]]; then
             printf '> \n'
           elif [[ "$rename_mode" == "slash-still-visible" ]]; then
             # Live Codex can keep "/rename" in the composer after the modal
@@ -1771,6 +1786,57 @@ grep -Fq $'surface:26\tescape' "$key_log"
 grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
 if grep -Fq 'start demo-project' "$send_log"; then
   printf 'no-success no-start unexpectedly sent a start prompt\n' >&2
+  exit 1
+fi
+[[ ! -s "$close_log" ]]
+
+# A modal that renders AFTER open_rename_dialog gives up must still be escaped,
+# and must not be reported as a clean launch. Observed live 2026-09-08 as Gate 4
+# run C: dismiss_rename_dialog read a modal-free screen, returned 0 without
+# sending Escape, and the Codex pane was left stuck on "Type a name and press
+# Enter" while the launcher printed a naming warning and exited 0. A blocked pane
+# cannot receive an AMQ doorbell, so exit 0 there is a silent success that is not one.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+rm -f "$send_log.late-modal-reads"
+late_modal_status=0
+CMUX_FAKE_RENAME_MODE=late-modal \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=3 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project \
+      >"$stdout_log" 2>"$tmp_dir/stderr.log" || late_modal_status=$?
+
+# The pane must be escaped even though the modal was absent on the first look.
+if ! grep -Fq $'surface:26\tescape' "$key_log"; then
+  printf 'late-modal rename left the Codex pane without an Escape\n' >&2
+  exit 1
+fi
+# The operator must be told the pane was blocked, not just that naming failed.
+if ! grep -Fq 'rename dialog' "$tmp_dir/stderr.log"; then
+  printf 'late-modal rename did not report the rename dialog state\n' >&2
+  exit 1
+fi
+# Exiting 0 is only acceptable if the pane was provably recovered. Silence plus
+# exit 0 is the failure mode this case exists to catch.
+if [[ "$late_modal_status" -eq 0 ]] &&
+   ! grep -Fq 'Dismissed the codex rename dialog after a failed rename.' "$tmp_dir/stderr.log"; then
+  printf 'late-modal rename exited 0 without proving the Codex pane was recovered\n' >&2
   exit 1
 fi
 [[ ! -s "$close_log" ]]
