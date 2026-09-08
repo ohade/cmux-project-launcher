@@ -103,7 +103,12 @@ workspace_root="${CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT:-$HOME/git}"
 codex_launcher="${CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER:-amq_codex}"
 claude_launcher="${CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER:-amq_claude}"
 wait_seconds="${CMUX_PROJECT_LAUNCHER_WAIT:-8}"
-poll_seconds="${CMUX_PROJECT_LAUNCHER_POLL:-45}"
+# 45s is too short for a FRESH ad-hoc workspace. Measured 2026-09-08: at 45 the
+# launcher reports "surface did not become ready" and registers ZERO keepalive rows;
+# at 150 both agents come up and register one row each. An agent started in a split of
+# an EXISTING workspace is ready in ~1s, which is why this went unnoticed — the cold
+# path is the slow one and the ad-hoc launcher always takes it.
+poll_seconds="${CMUX_PROJECT_LAUNCHER_POLL:-150}"
 codex_ready_regex="${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-OpenAI Codex|gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
 claude_ready_regex="${CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX:-Claude Code|Welcome to Claude|Opus [0-9]|Sonnet [0-9]|bypass permissions}"
 promote_wait_seconds="${CMUX_PROJECT_LAUNCHER_PROMOTE_WAIT:-5}"
