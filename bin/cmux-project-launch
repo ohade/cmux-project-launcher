@@ -527,11 +527,18 @@ amq_session_health() {
   local doctor_output=""
   local doctor_status=0
 
-  if doctor_output=$("$amq_bin" doctor --root "$session_root" --json --json-schema=2 2>&1); then
-    :
+  # stderr MUST NOT be merged into stdout here: doctor_output is parsed as JSON, and
+  # amq writes an "update available" notice to stderr on every invocation. With 2>&1
+  # that notice is prepended to the payload and the parse fails at char 0. Keep the
+  # streams apart, and keep stderr only for the failure message.
+  local doctor_err_file
+  doctor_err_file="$(mktemp)"
+  if doctor_output=$("$amq_bin" doctor --root "$session_root" --json --json-schema=2 2>"$doctor_err_file"); then
+    rm -f "$doctor_err_file"
   else
     doctor_status=$?
-    printf 'amq doctor command failed (exit %d): %s\n' "$doctor_status" "$doctor_output"
+    printf 'amq doctor command failed (exit %d): %s\n' "$doctor_status" "$(cat "$doctor_err_file" 2>/dev/null)"
+    rm -f "$doctor_err_file"
     return 1
   fi
   /usr/bin/python3 -c '
