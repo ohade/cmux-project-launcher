@@ -991,6 +991,122 @@ submit_prompt_when_input_ready() {
 # initial "Type a name" placeholder after text is entered, so it is not part of
 # the post-name active-state check.
 # A disappearing composer alone is not rename proof.
+#
+# Do not open this dialog through submit_prompt. That helper keeps pressing Enter
+# until the typed text leaves the composer or an agent activity marker appears.
+# /rename produces a modal, not an activity marker, and the slash text can remain
+# visible in the last input-probe lines after the dialog is already open. Extra
+# Enters then land in the modal; a later failure walks away and leaves Codex
+# stuck on "Type a name and press Enter" (2026-09-08 Gate 4, 1 run in 3).
+rename_dialog_prompt_visible() {
+  local text="$1"
+  grep -Fq -- "Type a name and press Enter" <<<"$text"
+}
+
+open_rename_dialog() {
+  local surface="$1"
+  local agent="$2"
+  local deadline
+  local text
+  "$cmux_bin" send --workspace "$workspace_ref" --surface "$surface" "/rename" >/dev/null
+  deadline=$((SECONDS + submit_confirm_wait_seconds))
+  while true; do
+    if ! text="$(read_surface_visible_text "$surface")"; then
+      echo "Could not inspect the $agent surface while opening /rename." >&2
+      return 1
+    fi
+    if rename_dialog_prompt_visible "$text"; then
+      return 0
+    fi
+    if prompt_visible_in_input "$surface" "/rename"; then
+      break
+    fi
+    (( SECONDS >= deadline )) && break
+    sleep 1
+  done
+  if ! prompt_visible_in_input "$surface" "/rename"; then
+    echo "Could not type /rename on the $agent surface." >&2
+    return 1
+  fi
+  sleep "$enter_delay_seconds"
+  "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" enter >/dev/null
+  deadline=$((SECONDS + submit_confirm_wait_seconds))
+  while true; do
+    if ! text="$(read_surface_visible_text "$surface")"; then
+      echo "Could not inspect the $agent rename dialog after submitting /rename." >&2
+      return 1
+    fi
+    if rename_dialog_prompt_visible "$text"; then
+      return 0
+    fi
+    (( SECONDS >= deadline )) && break
+    sleep 1
+  done
+  echo "The $agent /rename command did not open its naming dialog." >&2
+  return 1
+}
+
+rename_modal_visible() {
+  local text="$1"
+  local name="$2"
+  if rename_dialog_prompt_visible "$text"; then
+    return 0
+  fi
+  if [[ -n "$name" ]] && rename_dialog_is_active "$text" "$name"; then
+    return 0
+  fi
+  return 1
+}
+
+dismiss_rename_dialog() {
+  local surface="$1"
+  local agent="$2"
+  local name="${3:-}"
+  local attempt
+  local text
+  if ! text="$(read_surface_visible_text "$surface")"; then
+    echo "Could not inspect the $agent surface before dismissing the rename dialog." >&2
+    return 1
+  fi
+  if ! rename_modal_visible "$text" "$name"; then
+    return 0
+  fi
+  for ((attempt = 1; attempt <= enter_retries; attempt++)); do
+    "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" escape >/dev/null
+    sleep "$enter_delay_seconds"
+    if ! text="$(read_surface_visible_text "$surface")"; then
+      echo "Could not inspect the $agent surface while dismissing the rename dialog." >&2
+      return 1
+    fi
+    if ! rename_modal_visible "$text" "$name"; then
+      echo "Dismissed the $agent rename dialog after a failed rename." >&2
+      return 0
+    fi
+  done
+  echo "Could not dismiss the $agent rename dialog; $agent may still be in Type a name and press Enter." >&2
+  return 1
+}
+
+# True when the last visible line looks like a returned-to-idle composer, not
+# the confirm footer or the name still sitting in the modal. A warning or
+# sqlite3 line under the footer is not idle — r4 interleaved that class of
+# text onto the composer, and the same class one line lower used to make
+# dismiss_rename_dialog return 0 without sending Escape.
+rename_dialog_returned_to_composer() {
+  local last="$1"
+  local name="$2"
+  case "$last" in
+    *"Press enter to confirm"*) return 1 ;;
+  esac
+  if [[ -n "$name" && "$last" == *"$name"* ]]; then
+    return 1
+  fi
+  case "$last" in
+    '>'|'> '*|'›'|'› '*) return 0 ;;
+  esac
+  return 1
+}
+
 rename_dialog_is_active() {
   local text="$1"
   local name="$2"
@@ -1000,7 +1116,8 @@ rename_dialog_is_active() {
   last_nonblank="$(awk 'NF { line = $0 } END { print line }' <<<"$input_region")"
   grep -Eq -- '(^|[[:space:]])(Name|Rename) thread([[:space:]]|$)' <<<"$input_region" \
     && grep -Fq -- "$name" <<<"$input_region" \
-    && [[ "$last_nonblank" == *"Press enter to confirm"* ]]
+    && grep -Fq -- "Press enter to confirm" <<<"$input_region" \
+    && ! rename_dialog_returned_to_composer "$last_nonblank" "$name"
 }
 
 count_rename_success_markers() {
@@ -1027,21 +1144,20 @@ rename_thread() {
   local deadline
   local text
   local successes
-  if ! submit_prompt "$surface" "/rename" "$agent"; then
+  if ! open_rename_dialog "$surface" "$agent"; then
+    dismiss_rename_dialog "$surface" "$agent" || true
     echo "Could not open the $agent rename prompt; leaving the session name unchanged." >&2
-    return 1
-  fi
-  if ! wait_for_surface_literals "$surface" "Type a name and press Enter"; then
-    echo "The $agent /rename command did not open its naming dialog; refusing to type '$name'." >&2
     return 1
   fi
   sleep "$enter_delay_seconds"
   "$cmux_bin" send --workspace "$workspace_ref" --surface "$surface" "$name" >/dev/null
   if ! wait_for_prompt_visible "$surface" "$name"; then
+    dismiss_rename_dialog "$surface" "$agent" "$name" || true
     echo "Opened the $agent rename prompt but could not type the name '$name'." >&2
     return 1
   fi
   if ! text="$(read_surface_visible_text "$surface")"; then
+    dismiss_rename_dialog "$surface" "$agent" "$name" || true
     echo "Could not inspect the $agent rename dialog before confirming '$name'." >&2
     return 1
   fi
@@ -1052,6 +1168,7 @@ rename_thread() {
     deadline=$((SECONDS + submit_confirm_wait_seconds))
     while true; do
       if ! text="$(read_surface_visible_text "$surface")"; then
+        dismiss_rename_dialog "$surface" "$agent" "$name" || true
         echo "Could not inspect the $agent rename result for '$name'." >&2
         return 1
       fi
@@ -1066,6 +1183,7 @@ rename_thread() {
       break
     fi
   done
+  dismiss_rename_dialog "$surface" "$agent" "$name" || true
   echo "The $agent rename dialog did not confirm the session name '$name'." >&2
   return 1
 }

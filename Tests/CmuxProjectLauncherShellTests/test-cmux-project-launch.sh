@@ -331,13 +331,20 @@ JSON
           rename_retry_keys=1
         fi
         rename_name="$(awk -F '\t' -v surface="$surface" '$1 == surface { count++; if (count == 2) print $2 }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || true)"
-        if [[ "$send_count" -eq 0 ]]; then
+        last_key="$(awk -F '\t' -v surface="$surface" '$1 == surface { key = $2 } END { print key }' "${CMUX_FAKE_KEY_LOG:?}" 2>/dev/null || true)"
+        if [[ "$last_key" == "escape" ]]; then
+          printf '> \n'
+        elif [[ "$send_count" -eq 0 ]]; then
           printf '> \n'
         elif [[ "$send_count" -eq 1 && "$key_count" -eq 0 ]]; then
           printf '> /rename\n'
         elif [[ "$send_count" -eq 1 ]]; then
           if [[ "$rename_mode" == "no-modal" ]]; then
             printf '> \n'
+          elif [[ "$rename_mode" == "slash-still-visible" ]]; then
+            # Live Codex can keep "/rename" in the composer after the modal
+            # opens. Extra Enters from submit_prompt then land in the dialog.
+            printf 'Name thread\nType a name and press Enter\n> /rename\n'
           else
             printf 'Name thread\nType a name and press Enter\n> \n'
           fi
@@ -350,6 +357,11 @@ JSON
             printf 'Name thread\n> %s\nPress enter to confirm\n> ordinary prompt\n' "$rename_name"
           elif [[ "$rename_mode" == "missed-enter" || "$rename_mode" == "no-success" ]]; then
             printf 'Name thread\n> %s\nPress enter to confirm\n' "$rename_name"
+          elif [[ "$rename_mode" == "footer-displaced" ]]; then
+            # Live Codex can print a warning under the confirm footer. The
+            # footer is then not the last non-blank line.
+            printf 'Name thread\n> %s\nPress enter to confirm\nwarning: cannot confirm codex CLI session "%s/codex" (sqlite3 query\n' \
+              "$rename_name" "$rename_name"
           elif [[ "$rename_mode" == "wrapped-success" ]]; then
             printf 'Session renamed to %s\n%s. To resume this session run codex resume %s\n> \n' \
               "${rename_name%-*}-" "${rename_name##*-}" "$rename_name"
@@ -359,6 +371,9 @@ JSON
         elif [[ "$send_count" -eq 2 ]]; then
           if [[ "$rename_mode" == "no-success" ]]; then
             printf 'Name thread\n> %s\nPress enter to confirm\n' "$rename_name"
+          elif [[ "$rename_mode" == "footer-displaced" ]]; then
+            printf 'Name thread\n> %s\nPress enter to confirm\nwarning: cannot confirm codex CLI session "%s/codex" (sqlite3 query\n' \
+              "$rename_name" "$rename_name"
           elif [[ "$rename_mode" == "wrapped-success" ]]; then
             printf 'Session renamed to %s\n%s. To resume this session run codex resume %s\n> \n' \
               "${rename_name%-*}-" "${rename_name##*-}" "$rename_name"
@@ -1688,6 +1703,111 @@ if grep -Fq 'start demo-project' "$send_log"; then
   exit 1
 fi
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+[[ ! -s "$close_log" ]]
+
+# /rename that leaves the slash in the composer after the modal opens must
+# still name the thread. submit_prompt would keep pressing Enter here.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_RENAME_MODE=slash-still-visible \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log"
+
+grep -Fq $'surface:26\t/rename' "$send_log"
+grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
+grep -Fq $'surface:26\t$start demo-project' "$send_log"
+grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
+if grep -Fq $'surface:26\tescape' "$key_log"; then
+  printf 'successful slash-still-visible rename unexpectedly sent escape\n' >&2
+  exit 1
+fi
+[[ ! -s "$close_log" ]]
+
+# A confirmed-Enter miss that leaves the modal open must Escape out so the
+# Codex pane is not stuck on Type a name. --no-start still preserves the
+# workspace (exit 0) after the dismiss.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_RENAME_MODE=no-success \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+grep -Fq 'did not confirm the session name' "$tmp_dir/stderr.log"
+grep -Fq 'Dismissed the codex rename dialog after a failed rename.' "$tmp_dir/stderr.log"
+grep -Fq $'surface:26\tescape' "$key_log"
+grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'no-success no-start unexpectedly sent a start prompt\n' >&2
+  exit 1
+fi
+[[ ! -s "$close_log" ]]
+
+# Confirm footer still present, but a warning line under it, must still Escape.
+# last_nonblank is no longer the footer; that used to skip dismiss entirely.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+CMUX_FAKE_RENAME_MODE=footer-displaced \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+grep -Fq 'did not confirm the session name' "$tmp_dir/stderr.log"
+grep -Fq 'Dismissed the codex rename dialog after a failed rename.' "$tmp_dir/stderr.log"
+grep -Fq $'surface:26\tescape' "$key_log"
+grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'footer-displaced no-start unexpectedly sent a start prompt\n' >&2
+  exit 1
+fi
 [[ ! -s "$close_log" ]]
 
 : >"$send_log"
