@@ -14,7 +14,8 @@ a post-boot `/rename codex-<project>`), then sends:
 With --no-start (used for ad-hoc scratch workspaces), the workspace is created and
 the sessions are renamed, but neither /start is sent. In that mode the workspace is
 the deliverable: readiness and rename are best-effort and never discard the
-workspace on failure.
+workspace on failure. A ready agent still gets its exact AMQ wake, and an agent
+left without one fails the launch (non-zero exit) while the workspace is kept.
 
 Environment:
   CMUX_PROJECT_LAUNCHER_CMUX     cmux CLI path
@@ -798,16 +799,26 @@ ensure_surface_runtime() {
   wait_for_surface_runtime "$surface"
 }
 
+agent_not_ready_reason=""
 wait_agent_ready() {
-  # 0 = the surface has a live runtime AND shows the agent's boot banner; 1 = not ready.
+  # 0 = the surface has a live runtime AND shows the agent's boot banner; 1 = not ready,
+  # with the cause left in agent_not_ready_reason for the caller's diagnostics.
   local surface="$1"
   local ready_regex="$2"
-  ensure_surface_runtime "$surface" || return 1
+  agent_not_ready_reason=""
+  if ! ensure_surface_runtime "$surface"; then
+    agent_not_ready_reason="cmux reported no live terminal tty for $surface"
+    return 1
+  fi
   if wait_for_surface_text "$surface" "$ready_regex"; then
     return 0
   fi
   sleep "$wait_seconds"
-  wait_for_surface_text "$surface" "$ready_regex"
+  if wait_for_surface_text "$surface" "$ready_regex"; then
+    return 0
+  fi
+  agent_not_ready_reason="$surface never showed a banner matching $ready_regex"
+  return 1
 }
 
 attach_exact_wake() {
@@ -888,8 +899,18 @@ fi
 
 codex_ready=0
 claude_ready=0
-if wait_agent_ready "$codex_surface" "$codex_ready_regex"; then codex_ready=1; fi
-if wait_agent_ready "$claude_surface" "$claude_ready_regex"; then claude_ready=1; fi
+codex_not_ready_reason=""
+claude_not_ready_reason=""
+if wait_agent_ready "$codex_surface" "$codex_ready_regex"; then
+  codex_ready=1
+else
+  codex_not_ready_reason="$agent_not_ready_reason"
+fi
+if wait_agent_ready "$claude_surface" "$claude_ready_regex"; then
+  claude_ready=1
+else
+  claude_not_ready_reason="$agent_not_ready_reason"
+fi
 
 if [[ "$no_start" -ne 1 ]]; then
   if [[ "$codex_ready" -ne 1 ]]; then
@@ -902,22 +923,31 @@ if [[ "$no_start" -ne 1 ]]; then
   fi
 fi
 
-if [[ "$codex_ready" -eq 1 && "$claude_ready" -eq 1 ]]; then
+# Attach each ready agent on its own. 2026-09-23 Gate 4: cmux never reported a
+# tty for the Codex surface, and requiring both agents here left the ready
+# Claude pane without a wake as well, so the room had zero wakes.
+codex_attached=0
+claude_attached=0
+if [[ "$codex_ready" -eq 1 ]]; then
   if ! attach_exact_wake codex "$codex_surface_id"; then
     launch_ok=1
     echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed. Messages remain queued; no start prompts were sent." >&2
     exit 1
   fi
+  codex_attached=1
+fi
+if [[ "$claude_ready" -eq 1 ]]; then
   if ! attach_exact_wake claude "$claude_surface_id"; then
     # Codex was already baselined. Surface its pre-existing queue before
     # exiting so a one-sided attach failure cannot suppress that backlog.
-    if ! notify_existing_backlog codex "$codex_surface_id"; then
+    if [[ "$codex_attached" -eq 1 ]] && ! notify_existing_backlog codex "$codex_surface_id"; then
       echo "Codex wake attached, but its queued AMQ messages could not be surfaced after Claude attachment failed." >&2
     fi
     launch_ok=1
     echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed. Messages remain queued; no start prompts were sent." >&2
     exit 1
   fi
+  claude_attached=1
 fi
 
 # Name the Codex thread post-boot. Claude was named at boot via
@@ -954,13 +984,17 @@ fi
 # Surface queued work only after the Codex naming handshake is finished. An
 # earlier doorbell can be consumed as rename input and leave both operations in
 # an ambiguous state.
-if [[ "$codex_ready" -eq 1 && "$claude_ready" -eq 1 ]]; then
-  if ! notify_existing_backlog codex "$codex_surface_id" || \
-     ! notify_existing_backlog claude "$claude_surface_id"; then
-    launch_ok=1
-    echo "Workspace $workspace_ref is live, but queued AMQ messages could not be surfaced. No start prompts were sent." >&2
-    exit 1
-  fi
+backlog_ok=1
+if [[ "$codex_attached" -eq 1 ]] && ! notify_existing_backlog codex "$codex_surface_id"; then
+  backlog_ok=0
+fi
+if [[ "$backlog_ok" -eq 1 && "$claude_attached" -eq 1 ]] && ! notify_existing_backlog claude "$claude_surface_id"; then
+  backlog_ok=0
+fi
+if [[ "$backlog_ok" -ne 1 ]]; then
+  launch_ok=1
+  echo "Workspace $workspace_ref is live, but queued AMQ messages could not be surfaced. No start prompts were sent." >&2
+  exit 1
 fi
 
 if [[ "$codex_pane_blocked" -eq 1 ]]; then
@@ -970,6 +1004,20 @@ if [[ "$codex_pane_blocked" -eq 1 ]]; then
 fi
 
 if [[ "$codex_rename_failed" -eq 1 ]]; then
+  exit 1
+fi
+
+# Only --no-start reaches this point with an agent that never became ready.
+# Exiting 0 here reported a launched room that had no working AMQ wake.
+if [[ "$codex_attached" -ne 1 || "$claude_attached" -ne 1 ]]; then
+  launch_ok=1
+  if [[ "$codex_attached" -ne 1 ]]; then
+    echo "Codex AMQ wake was not attached: ${codex_not_ready_reason:-its surface did not become ready}. Messages to codex remain queued." >&2
+  fi
+  if [[ "$claude_attached" -ne 1 ]]; then
+    echo "Claude AMQ wake was not attached: ${claude_not_ready_reason:-its surface did not become ready}. Messages to claude remain queued." >&2
+  fi
+  echo "Preserving $workspace_ref, but the launch is incomplete. No start prompts were sent." >&2
   exit 1
 fi
 

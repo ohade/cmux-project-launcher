@@ -430,6 +430,13 @@ JSON
       printf '[1] surface:27 "Claude" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:12\n' "$runtime_workspace"
       printf '    runtime=1 focused=0 selected=1 terminal=0x3 ghostty=0x4\n'
       printf '    tty=nil cwd=/Users/example/git\n'
+    elif [[ "${CMUX_FAKE_MODE:-ready}" == "codex-no-tty" ]]; then
+      printf '[0] surface:26 "Codex" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:11\n' "$runtime_workspace"
+      printf '    runtime=1 focused=1 selected=1 terminal=0x1 ghostty=0x2\n'
+      printf '    tty=nil cwd=/Users/example/git\n'
+      printf '[1] surface:27 "Claude" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:12\n' "$runtime_workspace"
+      printf '    runtime=1 focused=0 selected=1 terminal=0x3 ghostty=0x4\n'
+      printf '    tty=ttys027 cwd=/Users/example/git\n'
     elif [[ "${CMUX_FAKE_MODE:-ready}" == "ghostty-only" ]]; then
       printf '[0] surface:26 "Codex" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:11\n' "$runtime_workspace"
       printf '    runtime=1 focused=1 selected=1 terminal=0x1 ghostty=0x2\n'
@@ -1244,6 +1251,82 @@ grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
 grep -Fq 'no /start sent' "$stdout_log"
 [[ ! -s "$close_log" ]]
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+
+# 2026-09-23 Gate 4: cmux never reported a tty for the Codex surface while the
+# Claude surface was ready. --no-start skipped BOTH exact wake attaches and still
+# exited 0, so the room looked launched with zero wakes. Each ready agent must
+# attach on its own, and a missing wake must fail the launch while the ad-hoc
+# workspace is preserved.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+codex_no_tty_status=0
+CMUX_FAKE_MODE=codex-no-tty \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+  CMUX_PROJECT_LAUNCHER_PROMOTE_WAIT=1 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project \
+    >"$stdout_log" 2>"$tmp_dir/stderr.log" || codex_no_tty_status=$?
+if [[ "$codex_no_tty_status" -eq 0 ]]; then
+  printf 'codex-no-tty --no-start exited 0 without a Codex AMQ wake\n' >&2
+  exit 1
+fi
+if [[ "$(awk -F '\t' '$1 == "reattach" && $2 == "claude" { count++ } END { print count + 0 }' "$event_log")" -ne 1 ]]; then
+  printf 'codex-no-tty --no-start did not attach the ready Claude wake exactly once\n' >&2
+  exit 1
+fi
+if [[ "$(awk -F '\t' '$1 == "reattach" && $2 == "codex" { count++ } END { print count + 0 }' "$event_log")" -ne 0 ]]; then
+  printf 'codex-no-tty --no-start attached a Codex wake without a live Codex tty\n' >&2
+  exit 1
+fi
+grep -Fq 'Codex AMQ wake was not attached' "$tmp_dir/stderr.log"
+grep -Fq 'no live terminal tty' "$tmp_dir/stderr.log"
+[[ ! -s "$close_log" ]]
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'codex-no-tty --no-start unexpectedly sent a start prompt\n' >&2
+  exit 1
+fi
+
+# The second 2026-09-23 Gate 4 run: neither surface ever reported a tty. A
+# --no-start room with zero AMQ wakes must not exit 0.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+zero_wake_status=0
+CMUX_FAKE_MODE=ghostty-no-tty \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+  CMUX_PROJECT_LAUNCHER_PROMOTE_WAIT=1 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project \
+    >"$stdout_log" 2>"$tmp_dir/stderr.log" || zero_wake_status=$?
+if [[ "$zero_wake_status" -eq 0 ]]; then
+  printf 'zero-wake --no-start exited 0\n' >&2
+  exit 1
+fi
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+grep -Fq 'Codex AMQ wake was not attached' "$tmp_dir/stderr.log"
+grep -Fq 'Claude AMQ wake was not attached' "$tmp_dir/stderr.log"
+[[ ! -s "$close_log" ]]
 
 # A GUI-launched app has no Homebrew directory on PATH. The launcher must resolve
 # AMQ from a relative path hint before the base-root command substitution,
