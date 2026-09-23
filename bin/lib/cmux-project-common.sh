@@ -1148,12 +1148,25 @@ count_rename_success_markers() {
     tr -d '[:space:]'
 }
 
+# Codex 0.155.1 closes the naming dialog without printing "Session renamed to"
+# (Gate 4, 2026-09-23). It does append {"id":...,"thread_name":<name>,...} to
+# $CODEX_HOME/session_index.jsonl at rename time. Count rows for the exact name;
+# like the screen marker, only an increase after the confirming Enter is proof,
+# so an older row for a reused name proves nothing.
+count_rename_index_rows() {
+  local name="$1"
+  local index_file="${CODEX_HOME:-$HOME/.codex}/session_index.jsonl"
+  [[ -r "$index_file" ]] || { printf '0'; return 0; }
+  { grep -Fc -- "\"thread_name\":\"$name\"" "$index_file" || true; } | tr -d '[:space:]'
+}
+
 rename_thread() {
   local surface="$1"
   local name="$2"
   local agent="$3"
   local attempt
   local baseline_successes
+  local baseline_index_rows
   local deadline
   local text
   local successes
@@ -1175,6 +1188,7 @@ rename_thread() {
     return 1
   fi
   baseline_successes="$(count_rename_success_markers "$text" "$name" || true)"
+  baseline_index_rows="$(count_rename_index_rows "$name")"
   sleep "$enter_delay_seconds"
   for ((attempt = 1; attempt <= enter_retries; attempt++)); do
     "$cmux_bin" send-key --workspace "$workspace_ref" --surface "$surface" enter >/dev/null
@@ -1187,6 +1201,9 @@ rename_thread() {
       fi
       successes="$(count_rename_success_markers "$text" "$name" || true)"
       if [[ "$successes" -gt "$baseline_successes" ]]; then
+        return 0
+      fi
+      if [[ "$(count_rename_index_rows "$name")" -gt "$baseline_index_rows" ]]; then
         return 0
       fi
       (( SECONDS >= deadline )) && break

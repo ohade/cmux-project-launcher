@@ -30,6 +30,10 @@ mkdir -p "$fake_amq_root"
 export CMUX_PROJECT_LAUNCHER_LOG="$diagnostics_log"
 export CMUX_FAKE_EVENT_LOG="$event_log"
 export CMUX_FAKE_AMQ_ROOT="$fake_amq_root"
+# The launcher reads Codex's session index as rename proof. Keep it hermetic:
+# the real ~/.codex index can already hold a codex-demo-project row.
+export CODEX_HOME="$tmp_dir/codex-home"
+mkdir -p "$CODEX_HOME"
 cleanup() {
   local status=$?
   if [[ "$status" -ne 0 ]]; then
@@ -367,6 +371,15 @@ JSON
           printf 'Name thread\n> %s\n' "$rename_name"
         elif [[ "$send_count" -eq 2 && "$key_count" -eq 2 ]]; then
           if [[ "$rename_mode" == "vanished" ]]; then
+            printf '> \n'
+          elif [[ "$rename_mode" == "index-success" ]]; then
+            # Codex 0.155.1 (Gate 4, 2026-09-23): the dialog closes with no
+            # "Session renamed to" line; the name lands in session_index.jsonl.
+            index_file="${CODEX_HOME:?}/session_index.jsonl"
+            if ! grep -Fq "\"thread_name\":\"$rename_name\"" "$index_file" 2>/dev/null; then
+              printf '{"id":"fake-thread","thread_name":"%s","updated_at":"2026-09-23T10:54:01Z"}\n' \
+                "$rename_name" >>"$index_file"
+            fi
             printf '> \n'
           elif [[ "$rename_mode" == "stale-modal" ]]; then
             printf 'Name thread\n> %s\nPress enter to confirm\n> ordinary prompt\n' "$rename_name"
@@ -1445,6 +1458,71 @@ grep -Fq $'surface:26\t$start demo-project' "$send_log"
 grep -Fq $'surface:27\t/start demo-project' "$send_log"
 grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
 [[ ! -s "$close_log" ]]
+
+# Codex 0.155.1 prints no success line: the dialog closes and the new name is
+# written to $CODEX_HOME/session_index.jsonl. A new index row for the exact name
+# confirms the rename and allows the normal launch.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+: >"$CODEX_HOME/session_index.jsonl"
+CMUX_FAKE_RENAME_MODE=index-success \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log"
+
+grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
+grep -Fq $'surface:26\t$start demo-project' "$send_log"
+grep -Fq $'surface:27\t/start demo-project' "$send_log"
+grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
+[[ ! -s "$close_log" ]]
+
+# An index row that already existed before the confirming Enter is stale and
+# must not prove this rename (the vanished dialog alone stays unconfirmed).
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+printf '{"id":"old-thread","thread_name":"codex-demo-project","updated_at":"2026-09-01T00:00:00Z"}\n' \
+  >"$CODEX_HOME/session_index.jsonl"
+if CMUX_FAKE_RENAME_MODE=vanished \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'a stale session_index row unexpectedly confirmed the Codex rename\n' >&2
+  exit 1
+fi
+grep -Fq 'did not confirm the session name' "$tmp_dir/stderr.log"
+: >"$CODEX_HOME/session_index.jsonl"
 
 # Exact wake attachment is a launch gate: preserve the live workspace, expose
 # queued-message safety, and send neither rename nor start prompts on failure.
