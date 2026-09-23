@@ -844,6 +844,12 @@ case "$command" in
           exit 1
         fi
         ;;
+      refuse-codex)
+        if [[ "$agent" == "codex" ]]; then
+          printf 'reattach refused for codex\n' >&2
+          exit 1
+        fi
+        ;;
       warn-reuse)
         printf 'warning: reusing existing amq wake; this launch did not re-baseline it\n' >&2
         ;;
@@ -1554,7 +1560,48 @@ grep -Fq 'Messages remain queued; no start prompts were sent' "$tmp_dir/stderr.l
 [[ ! -s "$send_log" ]]
 [[ ! -s "$key_log" ]]
 [[ ! -s "$close_log" ]]
-[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+# Each ready agent is attached on its own (requirement 7): a refused Codex
+# attach must not skip the Claude attempt.
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+
+# If only the Codex attachment fails, the ready Claude still gets its exact wake
+# and its existing backlog is surfaced; the launch exits non-zero naming Codex.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+if CMUX_FAKE_REATTACH_MODE=refuse-codex \
+  CMUX_FAKE_UNREAD_CLAUDE=1 \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
+  printf 'failed Codex wake attachment unexpectedly launched\n' >&2
+  exit 1
+fi
+[[ "$(awk -F '\t' '$1 == "reattach" && $2 == "claude" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+grep -Fxq $'inject\tcmux\tcmux:surface:22222222-2222-4222-8222-222222222222\t[AMQ] Unread messages are queued. Run: amq drain --include-body' "$event_log"
+[[ "$(awk -F '\t' '$1 == "inject" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+grep -Fq 'exact AMQ wake attachment failed for codex.' "$tmp_dir/stderr.log"
+if grep -Fq 'exact AMQ wake attachment failed for claude' "$tmp_dir/stderr.log"; then
+  printf 'a successful Claude attach was reported as failed\n' >&2
+  exit 1
+fi
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$close_log" ]]
 
 # If the second attachment fails, the first wake has already baselined its
 # queue. Surface that agent's existing backlog before exiting, without sending

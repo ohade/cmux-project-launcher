@@ -926,28 +926,40 @@ fi
 # Attach each ready agent on its own. 2026-09-23 Gate 4: cmux never reported a
 # tty for the Codex surface, and requiring both agents here left the ready
 # Claude pane without a wake as well, so the room had zero wakes.
+# A refused attach for one agent must not skip the other either: try every
+# ready agent first, then fail naming each refusal (2026-09-23 /audit F3).
 codex_attached=0
 claude_attached=0
+attach_failed_agents=()
 if [[ "$codex_ready" -eq 1 ]]; then
-  if ! attach_exact_wake codex "$codex_surface_id"; then
-    launch_ok=1
-    echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed. Messages remain queued; no start prompts were sent." >&2
-    exit 1
+  if attach_exact_wake codex "$codex_surface_id"; then
+    codex_attached=1
+  else
+    attach_failed_agents+=(codex)
   fi
-  codex_attached=1
 fi
 if [[ "$claude_ready" -eq 1 ]]; then
-  if ! attach_exact_wake claude "$claude_surface_id"; then
-    # Codex was already baselined. Surface its pre-existing queue before
-    # exiting so a one-sided attach failure cannot suppress that backlog.
-    if [[ "$codex_attached" -eq 1 ]] && ! notify_existing_backlog codex "$codex_surface_id"; then
-      echo "Codex wake attached, but its queued AMQ messages could not be surfaced after Claude attachment failed." >&2
-    fi
-    launch_ok=1
-    echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed. Messages remain queued; no start prompts were sent." >&2
-    exit 1
+  if attach_exact_wake claude "$claude_surface_id"; then
+    claude_attached=1
+  else
+    attach_failed_agents+=(claude)
   fi
-  claude_attached=1
+fi
+if [[ "${#attach_failed_agents[@]}" -gt 0 ]]; then
+  # An attached wake was already baselined. Surface its pre-existing queue
+  # before exiting so a one-sided attach failure cannot suppress that backlog.
+  if [[ "$codex_attached" -eq 1 ]] && ! notify_existing_backlog codex "$codex_surface_id"; then
+    echo "Codex wake attached, but its queued AMQ messages could not be surfaced after another attachment failed." >&2
+  fi
+  if [[ "$claude_attached" -eq 1 ]] && ! notify_existing_backlog claude "$claude_surface_id"; then
+    echo "Claude wake attached, but its queued AMQ messages could not be surfaced after another attachment failed." >&2
+  fi
+  for failed_agent in "${attach_failed_agents[@]}"; do
+    echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed for $failed_agent." >&2
+  done
+  launch_ok=1
+  echo "Messages remain queued; no start prompts were sent." >&2
+  exit 1
 fi
 
 # Name the Codex thread post-boot. Claude was named at boot via
