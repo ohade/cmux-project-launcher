@@ -584,6 +584,7 @@ JSON
     fi
     root=""
     agents=""
+    force=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --root)
@@ -593,6 +594,10 @@ JSON
         --agents)
           agents="${2:?missing agents}"
           shift 2
+          ;;
+        --force)
+          force=$'\tforce'
+          shift
           ;;
         *)
           printf 'unexpected init argument: %s\n' "$1" >&2
@@ -624,7 +629,7 @@ JSON
       config_agents="$(printf '%s' "$agents" | sed 's/,/","/g')"
       printf '{"agents":["%s"]}\n' "$config_agents" >"$root/meta/config.json"
     fi
-    printf 'init\t%s\t%s\n' "$root" "$agents" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    printf 'init\t%s\t%s%s\n' "$root" "$agents" "$force" >>"${CMUX_FAKE_EVENT_LOG:?}"
     ;;
   doctor)
     root=""
@@ -1246,9 +1251,10 @@ grep -Fq 'Config=error' "$tmp_dir/stderr.log"
 [[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
 [[ ! -s "$create_log" ]]
 
-# A healthy room for a different roster is not usable by this two-agent
-# launcher. Require both launch agents to be configured, without mirroring the
-# rest of AMQ's mailbox layout in launcher code.
+# A project without its own agent choice keeps its existing room's agents
+# (Ohad, 2026-10-04). Before agent rosters this claude-only room was refused,
+# because the launcher could only start the Codex + Claude pair; now it launches
+# Claude alone. Doctor still has to confirm the room's own mailboxes.
 wrong_agent_root="$fake_amq_root/demo-project-wrong-agent"
 rm -rf "$wrong_agent_root"
 mkdir -p "$wrong_agent_root/meta"
@@ -1267,8 +1273,11 @@ printf '{"agents":["claude","user"]}\n' >"$wrong_agent_root/meta/config.json"
 chmod -R 700 "$wrong_agent_root"
 : >"$event_log"
 : >"$create_log"
-if CMUX_FAKE_EXPECT_PROJECT=demo-project-wrong-agent \
+: >"$send_log"
+: >"$key_log"
+CMUX_FAKE_EXPECT_PROJECT=demo-project-wrong-agent \
   CMUX_FAKE_EXPECT_SESSION=demo-project-wrong-agent \
+  CMUX_FAKE_AGENT_ROSTER=claude \
   CMUX_FAKE_AMQ_DOCTOR_MODE=wrong-agent \
   CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
@@ -1282,13 +1291,15 @@ if CMUX_FAKE_EXPECT_PROJECT=demo-project-wrong-agent \
   CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
   CMUX_PROJECT_LAUNCHER_POLL=1 \
   CMUX_PROJECT_LAUNCHER_WAIT=0 \
-    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-wrong-agent >"$stdout_log" 2>"$tmp_dir/stderr.log"; then
-  printf 'wrong-agent AMQ session unexpectedly launched\n' >&2
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project-wrong-agent >"$stdout_log"
+grep -Fq 'Launched demo-project-wrong-agent in workspace:10' "$stdout_log"
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+grep -Fq $'surface:27\t/start demo-project-wrong-agent' "$send_log"
+if grep -Fq 'surface:26' "$send_log"; then
+  printf 'claude-only room launch touched a Codex surface\n' >&2
   exit 1
 fi
-grep -Fq 'required configured mailbox codex missing' "$tmp_dir/stderr.log"
-[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
-[[ ! -s "$create_log" ]]
 
 # --no-start (ad-hoc) mode: workspace + rename, but NO $start//start sends.
 : >"$send_log"
@@ -3075,5 +3086,108 @@ CMUX_PROJECT_LAUNCHER_AGENTS=claude \
 grep -Fxq 'Launched ad-hoc workspace solo-claude-adhoc in workspace:10 (Claude name requested at boot; no /start sent)' "$stdout_log"
 [[ ! -s "$send_log" ]]
 [[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+
+# make_fake_room <root> <agent>...: a room with real AMQ mailbox directories, so
+# the cases below also hold when CMUX_PROJECT_LAUNCHER_REAL_AMQ runs doctor. Each
+# test run has its own temporary AMQ root, so the room is always new.
+make_fake_room() {
+  local root="$1"
+  local agent
+  local config_agents=""
+  shift
+  mkdir -p "$root/meta"
+  for agent in "$@"; do
+    mkdir -p \
+      "$root/agents/$agent/inbox/tmp" \
+      "$root/agents/$agent/inbox/new" \
+      "$root/agents/$agent/inbox/cur" \
+      "$root/agents/$agent/outbox/sent" \
+      "$root/agents/$agent/dlq/tmp" \
+      "$root/agents/$agent/dlq/new" \
+      "$root/agents/$agent/dlq/cur" \
+      "$root/agents/$agent/receipts"
+    config_agents="${config_agents:+$config_agents,}\"$agent\""
+  done
+  printf '{"version":1,"created_utc":"2026-10-01T00:00:00Z","agents":[%s]}\n' "$config_agents" >"$root/meta/config.json"
+  chmod -R 700 "$root"
+}
+
+# room_case <project> [VAR=value]...: launch <project> with the fake binaries and
+# the given extra environment; stdout, stderr and the exit status are kept.
+room_case_status=0
+room_case() {
+  local project="$1"
+  shift
+  : >"$send_log"
+  : >"$key_log"
+  : >"$event_log"
+  : >"$create_log"
+  : >"$close_log"
+  room_case_status=0
+  env "$@" \
+    CMUX_FAKE_EXPECT_SESSION="$project" \
+    CMUX_FAKE_EXPECT_PROJECT="$project" \
+    CMUX_FAKE_SEND_LOG="$send_log" \
+    CMUX_FAKE_KEY_LOG="$key_log" \
+    CMUX_FAKE_CREATE_LOG="$create_log" \
+    CMUX_FAKE_SELECT_LOG="$select_log" \
+    CMUX_FAKE_OPEN_LOG="$open_log" \
+    CMUX_FAKE_CLOSE_LOG="$close_log" \
+    CMUX_PROJECT_LAUNCHER_POLL=1 \
+    CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" "$project" >"$stdout_log" 2>"$tmp_dir/stderr.log" || room_case_status=$?
+}
+
+# A new room starts with the app's Settings default.
+room_case default-new CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS=codex CMUX_FAKE_AGENT_ROSTER=codex CMUX_FAKE_EXPECT_ROSTER=codex,user
+[[ "$room_case_status" -eq 0 ]]
+grep -Fxq $'init\t'"$fake_amq_root/default-new"$'\tcodex,user' "$event_log"
+grep -Fq 'Launched default-new in workspace:10' "$stdout_log"
+
+# An unusable default stops a new room before any AMQ or cmux mutation.
+room_case default-invalid CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS=claude,nosuchagent
+[[ "$room_case_status" -eq 2 ]]
+grep -Fq 'CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS' "$tmp_dir/stderr.log"
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ ! -s "$create_log" ]]
+
+# The default is not read for an existing room, so an unusable default does not
+# block a project whose room already says which agents it has.
+make_fake_room "$fake_amq_root/room-keeps" claude codex user
+room_case room-keeps CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS=claude,nosuchagent
+[[ "$room_case_status" -eq 0 ]]
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 2 ]]
+grep -Fq 'Launched room-keeps in workspace:10' "$stdout_log"
+
+# A chosen agent the room lacks is added to the room, keeping its mailboxes and
+# queued mail, before the workspace is created.
+make_fake_room "$fake_amq_root/room-grows" claude user
+room_case room-grows CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex CMUX_FAKE_EXPECT_ROSTER=claude,user,codex
+[[ "$room_case_status" -eq 0 ]]
+grep -Fxq $'init\t'"$fake_amq_root/room-grows"$'\tclaude,user,codex\tforce' "$event_log"
+grep -Fq 'Added codex to AMQ room room-grows' "$tmp_dir/stderr.log"
+init_line="$(awk -F '\t' '$1 == "init" { print NR; exit }' "$event_log")"
+workspace_create_line="$(awk -F '\t' '$1 == "workspace-create" { print NR; exit }' "$event_log")"
+[[ "$init_line" -lt "$workspace_create_line" ]]
+grep -Fq 'Launched room-grows in workspace:10' "$stdout_log"
+
+# A room whose config holds keys that `amq init --force` would drop is not grown.
+make_fake_room "$fake_amq_root/room-extra-keys" claude user
+printf '{"version":1,"created_utc":"2026-10-01T00:00:00Z","agents":["claude","user"],"team":"x"}\n' \
+  >"$fake_amq_root/room-extra-keys/meta/config.json"
+room_case room-extra-keys CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'team' "$tmp_dir/stderr.log"
+[[ "$(awk -F '\t' '$1 == "init" { count++ } END { print count + 0 }' "$event_log")" -eq 0 ]]
+[[ ! -s "$create_log" ]]
+
+# A failed growth leaves the room as it was and creates no workspace.
+make_fake_room "$fake_amq_root/room-grow-fails" claude user
+room_case room-grow-fails CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex CMUX_FAKE_AMQ_INIT_FAIL=1
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'Could not add codex to AMQ room room-grow-fails' "$tmp_dir/stderr.log"
+[[ ! -s "$create_log" ]]
+grep -Fq '"agents":["claude","user"]' "$fake_amq_root/room-grow-fails/meta/config.json"
 
 printf 'ok - cmux project launch shell fixtures passed\n'

@@ -138,14 +138,24 @@ source "$script_dir/lib/cmux-project-common.sh"
 agent_var_set codex ready_regex "${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-OpenAI Codex|gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
 agent_var_set claude ready_regex "${CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX:-Claude Code|Welcome to Claude|Opus [0-9]|Sonnet [0-9]|bypass permissions}"
 
-# Unset means the Codex + Claude pair. An explicitly empty value is a caller bug,
-# not a request for the default, so it is rejected like any other unusable roster.
-# This is a usage error, so it is reported before setup_diagnostics_log routes
-# stderr through tee: a 2026-10-04 load probe lost this message in 2 of 150 exits
-# because the tee child had not written it when the caller read stderr.
-if ! parse_agent_roster "${CMUX_PROJECT_LAUNCHER_AGENTS-claude,codex}"; then
-  echo "CMUX_PROJECT_LAUNCHER_AGENTS is not a usable agent list: $(agent_roster_reason). Choose one or more of: ${known_agents_roster[*]}. Created nothing." >&2
-  exit 2
+# CMUX_PROJECT_LAUNCHER_AGENTS is the project's own agent choice. Without one the
+# agents are resolved once the AMQ root is known (resolve_launch_agents): an
+# existing room keeps its agents, and a new room starts with
+# CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS. An explicitly empty value is a caller
+# bug, not a request for the default, so it is rejected like any other unusable
+# list. This is a usage error, so it is reported before setup_diagnostics_log
+# routes stderr through tee: a 2026-10-04 load probe lost this message in 2 of
+# 150 exits because the tee child had not written it when the caller read stderr.
+agent_choice_explicit=0
+if [[ -n "${CMUX_PROJECT_LAUNCHER_AGENTS+x}" ]]; then
+  if ! parse_agent_roster "$CMUX_PROJECT_LAUNCHER_AGENTS"; then
+    echo "CMUX_PROJECT_LAUNCHER_AGENTS is not a usable agent list: $(agent_roster_reason). Choose one or more of: ${known_agents_roster[*]}. Created nothing." >&2
+    exit 2
+  fi
+  agent_choice_explicit=1
+else
+  # Provisional until resolve_launch_agents runs, before any AMQ or cmux change.
+  parse_agent_roster claude,codex
 fi
 
 setup_diagnostics_log() {
@@ -594,6 +604,101 @@ if problems:
 ' "${launch_agents_roster[@]}" <<<"$doctor_output"
 }
 
+# Which agents this launch starts, when the project made no choice of its own: an
+# existing room keeps its agents (Ohad, 2026-10-04), and a new room starts with the
+# app's Settings default. A room handle this launcher cannot start is named and
+# skipped. Runs under the project lock, before any AMQ or cmux change.
+resolve_launch_agents() {
+  local config="$amq_base_root/$project/meta/config.json"
+  local handles=""
+  local handle
+  local known=""
+  local unknown=""
+  [[ "$agent_choice_explicit" -eq 1 ]] && return 0
+  if [[ -f "$config" ]] && handles="$(room_agent_handles "$config")"; then
+    while IFS= read -r handle; do
+      [[ -n "$handle" ]] || continue
+      if agent_field "$handle" surface_name >/dev/null; then
+        known="${known:+$known,}$handle"
+      else
+        unknown="${unknown:+$unknown, }$handle"
+      fi
+    done <<<"$handles"
+    if [[ -n "$known" ]] && parse_agent_roster "$known"; then
+      if [[ -n "$unknown" ]]; then
+        echo "AMQ room $project also lists $unknown, which this launcher cannot start; launching $(launch_agent_names)." >&2
+      fi
+      return 0
+    fi
+  fi
+  if ! parse_agent_roster "${CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS-claude,codex}"; then
+    echo "CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS is not a usable agent list: $(agent_roster_reason). Choose one or more of: ${known_agents_roster[*]}. Created nothing." >&2
+    exit 2
+  fi
+}
+
+# Adds chosen agents that an existing room lacks, before any workspace exists.
+# `amq init --force` on AMQ 0.77.3 keeps every mailbox and queued message (probed
+# 2026-10-04) but rewrites config.json: it resets created_utc and drops any key
+# besides version, created_utc and agents. A room with such keys is therefore
+# not grown. The room's own handle list is kept and the new agents are appended.
+grow_amq_session() {
+  local session="$1"
+  local session_root="$amq_base_root/$session"
+  local plan=""
+  local plan_status=0
+  local new_agents
+  local added
+  local grow_output=""
+  local grow_status=0
+  plan="$(/usr/bin/python3 - "$session_root/meta/config.json" "${launch_agents_roster[@]}" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        config = json.load(fh)
+    agents = config["agents"]
+    if not isinstance(agents, list) or not all(isinstance(a, str) for a in agents):
+        raise ValueError("agents is not a list of handles")
+except Exception:
+    # Unreadable: leave the verdict to amq doctor.
+    sys.exit(0)
+missing = [agent for agent in sys.argv[2:] if agent not in agents]
+if not missing:
+    sys.exit(0)
+extra = sorted(set(config) - {"version", "created_utc", "agents"})
+if extra:
+    print(",".join(missing) + "\t" + ", ".join(extra))
+    sys.exit(3)
+print(",".join(agents + missing) + "\t" + ",".join(missing))
+PY
+)" || plan_status=$?
+  if [[ "$plan_status" -eq 3 ]]; then
+    echo "AMQ room $session lacks ${plan%%$'\t'*}, but its config also holds ${plan#*$'\t'}, which amq init --force would drop. Add the agents to the room by hand, or choose agents it has. Created nothing." >&2
+    return 1
+  elif [[ "$plan_status" -ne 0 ]]; then
+    echo "Could not read AMQ room $session at $session_root to compare its agents. Created nothing." >&2
+    return 1
+  fi
+  [[ -z "$plan" ]] && return 0
+  new_agents="${plan%%$'\t'*}"
+  added="${plan#*$'\t'}"
+  if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+    printf 'would add %s to AMQ session: %q init --root %q --agents %q --force\n' \
+      "$added" "$amq_bin" "$session_root" "$new_agents"
+    return 0
+  fi
+  if grow_output=$("$amq_bin" init --root "$session_root" --agents "$new_agents" --force 2>&1); then
+    :
+  else
+    grow_status=$?
+    echo "Could not add ${added//,/, } to AMQ room $session (exit $grow_status): $grow_output. Created nothing." >&2
+    return 1
+  fi
+  echo "Added ${added//,/, } to AMQ room $session." >&2
+}
+
 ensure_amq_session_initialized() {
   local session="$1"
   local session_root="$amq_base_root/$session"
@@ -602,6 +707,9 @@ ensure_amq_session_initialized() {
   local init_status=0
 
   if [[ -f "$session_root/meta/config.json" ]]; then
+    if ! grow_amq_session "$session"; then
+      return 1
+    fi
     if health_output=$(amq_session_health "$session_root"); then
       return 0
     fi
@@ -633,6 +741,7 @@ fi
 if ! acquire_project_launch_lock; then
   exit 1
 fi
+resolve_launch_agents
 if ! amq_who_state="$(amq_who_json "$amq_base_root")"; then
   echo "Could not inspect AMQ sessions. Refusing to guess an unused session." >&2
   exit 1

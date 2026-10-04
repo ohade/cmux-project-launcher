@@ -148,6 +148,27 @@ parse_agent_roster() {
   done
 }
 
+# room_agent_handles <config.json> prints an AMQ room's agent handles, one per line
+# and in the room's order, without the human "user" handle. Returns 1 when the
+# config cannot be read as a list of handles.
+room_agent_handles() {
+  /usr/bin/python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        agents = json.load(fh)["agents"]
+except Exception:
+    sys.exit(1)
+if not isinstance(agents, list) or not all(isinstance(agent, str) for agent in agents):
+    sys.exit(1)
+for agent in agents:
+    if agent != "user":
+        print(agent)
+PY
+}
+
 # "Codex", "Codex and Claude", "Codex, Claude and Grok": the chosen agents' pane
 # names in pipeline order, joined for messages. $1 overrides the last joiner.
 launch_agent_names() {
