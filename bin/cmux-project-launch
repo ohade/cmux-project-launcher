@@ -17,7 +17,12 @@ the deliverable: readiness and rename are best-effort and never discard the
 workspace on failure. A ready agent still gets its exact AMQ wake, and an agent
 left without one fails the launch (non-zero exit) while the workspace is kept.
 
+CMUX_PROJECT_LAUNCHER_AGENTS chooses the agents. With one agent the workspace has
+one pane, and only that agent is named, attached and started.
+
 Environment:
+  CMUX_PROJECT_LAUNCHER_AGENTS   comma-separated agents to launch, any order:
+                                  claude, codex (default: claude,codex)
   CMUX_PROJECT_LAUNCHER_CMUX     cmux CLI path
   CMUX_PROJECT_LAUNCHER_WAIT     seconds to wait before post-boot sends (default: 8)
   CMUX_PROJECT_LAUNCHER_POLL     seconds to poll read-screen before fallback (default: 150)
@@ -110,8 +115,6 @@ wait_seconds="${CMUX_PROJECT_LAUNCHER_WAIT:-8}"
 # an EXISTING workspace is ready in ~1s, which is why this went unnoticed — the cold
 # path is the slow one and the ad-hoc launcher always takes it.
 poll_seconds="${CMUX_PROJECT_LAUNCHER_POLL:-150}"
-codex_ready_regex="${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-OpenAI Codex|gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
-claude_ready_regex="${CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX:-Claude Code|Welcome to Claude|Opus [0-9]|Sonnet [0-9]|bypass permissions}"
 promote_wait_seconds="${CMUX_PROJECT_LAUNCHER_PROMOTE_WAIT:-5}"
 enter_delay_seconds="${CMUX_PROJECT_LAUNCHER_ENTER_DELAY:-0.5}"
 enter_retries="${CMUX_PROJECT_LAUNCHER_ENTER_RETRIES:-3}"
@@ -129,6 +132,21 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/lib/cmux-project-common.sh
 source "$script_dir/lib/cmux-project-common.sh"
+
+# Stored as $codex_ready_regex and $claude_ready_regex; the pipeline reads them per
+# agent through agent_var_get.
+agent_var_set codex ready_regex "${CMUX_PROJECT_LAUNCHER_CODEX_READY_REGEX:-OpenAI Codex|gpt-[0-9][^[:space:]]*[[:space:]].*Ready|Ready.*gpt-[0-9]}"
+agent_var_set claude ready_regex "${CMUX_PROJECT_LAUNCHER_CLAUDE_READY_REGEX:-Claude Code|Welcome to Claude|Opus [0-9]|Sonnet [0-9]|bypass permissions}"
+
+# Unset means the Codex + Claude pair. An explicitly empty value is a caller bug,
+# not a request for the default, so it is rejected like any other unusable roster.
+# This is a usage error, so it is reported before setup_diagnostics_log routes
+# stderr through tee: a 2026-10-04 load probe lost this message in 2 of 150 exits
+# because the tee child had not written it when the caller read stderr.
+if ! parse_agent_roster "${CMUX_PROJECT_LAUNCHER_AGENTS-claude,codex}"; then
+  echo "CMUX_PROJECT_LAUNCHER_AGENTS is not a usable agent list: $(agent_roster_reason). Choose one or more of: ${known_agents_roster[*]}. Created nothing." >&2
+  exit 2
+fi
 
 setup_diagnostics_log() {
   local log_dir
@@ -202,10 +220,10 @@ cleanup_failed_workspace() {
       echo "Failed to close unsuccessful cmux workspace $workspace_ref: $close_output" >&2
     else
       # Retirement is identity-safe and fail-closed, so conservatively attempt
-      # both identities after a failed workspace has been closed rather than
-      # infer partial attachment from the failure phase.
+      # every launched identity after a failed workspace has been closed rather
+      # than infer partial attachment from the failure phase.
       if [[ -n "${amq_session:-}" ]]; then
-        cleanup_agents="codex,claude"
+        cleanup_agents="$launch_retire_csv"
         retire_amq_session "$amq_session" "$cleanup_agents" || \
           echo "Failed to retire AMQ wakes for unsuccessful session $amq_session; the defect remains unresolved." >&2
       fi
@@ -231,18 +249,16 @@ existing_workspace_agents_ready() {
   local surface_rows
   local process_status
   local row
+  local agent
+  local agent_name
+  local expected_surfaces=""
+  local surfaces_unique=1
   local -a pane_refs
   local -a all_surface_rows
-  local -a codex_refs
-  local -a claude_refs
-  local -a codex_ids
-  local -a claude_ids
+  local -a agent_refs
+  local -a agent_ids
   pane_refs=()
   all_surface_rows=()
-  codex_refs=()
-  claude_refs=()
-  codex_ids=()
-  claude_ids=()
 
   if ! pane_rows="$("$cmux_bin" list-panes --workspace "$target_workspace_ref" 2>/dev/null)"; then
     existing_agent_health_reason="its panes could not be inspected"
@@ -269,68 +285,62 @@ existing_workspace_agents_ready() {
     return 2
   fi
   surface_rows="$(printf '%s\n' "${all_surface_rows[@]}")"
-  while IFS= read -r row || [[ -n "$row" ]]; do
-    [[ -n "$row" ]] && codex_refs+=("$row")
-  done < <(printf '%s\n' "$surface_rows" | surface_refs_for_name "Codex")
-  while IFS= read -r row || [[ -n "$row" ]]; do
-    [[ -n "$row" ]] && claude_refs+=("$row")
-  done < <(printf '%s\n' "$surface_rows" | surface_refs_for_name "Claude")
-  while IFS= read -r row || [[ -n "$row" ]]; do
-    [[ -n "$row" ]] && codex_ids+=("$row")
-  done < <(printf '%s\n' "$surface_rows" | surface_ids_for_name "Codex")
-  while IFS= read -r row || [[ -n "$row" ]]; do
-    [[ -n "$row" ]] && claude_ids+=("$row")
-  done < <(printf '%s\n' "$surface_rows" | surface_ids_for_name "Claude")
-  if [[ "${#codex_refs[@]}" -ne 1 || "${#claude_refs[@]}" -ne 1 \
-        || "${#codex_ids[@]}" -ne 1 || "${#claude_ids[@]}" -ne 1 ]]; then
-    existing_agent_health_reason="it does not contain exactly one Codex surface and one Claude surface"
+  # Each check runs for every chosen agent before the next check starts, so the
+  # first reported defect is the same one the fixed Codex + Claude code reported.
+  for agent in "${launch_agents[@]}"; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    agent_refs=()
+    agent_ids=()
+    while IFS= read -r row || [[ -n "$row" ]]; do
+      [[ -n "$row" ]] && agent_refs+=("$row")
+    done < <(printf '%s\n' "$surface_rows" | surface_refs_for_name "$agent_name")
+    while IFS= read -r row || [[ -n "$row" ]]; do
+      [[ -n "$row" ]] && agent_ids+=("$row")
+    done < <(printf '%s\n' "$surface_rows" | surface_ids_for_name "$agent_name")
+    if [[ "${#agent_refs[@]}" -ne 1 || "${#agent_ids[@]}" -ne 1 ]]; then
+      surfaces_unique=0
+    else
+      agent_var_set "$agent" existing_ref "${agent_refs[0]}"
+      agent_var_set "$agent" existing_id "${agent_ids[0]}"
+    fi
+    expected_surfaces="${expected_surfaces:+$expected_surfaces and }one $agent_name surface"
+  done
+  if [[ "$surfaces_unique" -ne 1 ]]; then
+    existing_agent_health_reason="it does not contain exactly $expected_surfaces"
     return 1
   fi
-  if ! surface_has_live_runtime "${codex_refs[0]}"; then
-    existing_agent_health_reason="its Codex surface has no live terminal runtime"
-    return 1
-  fi
-  if ! surface_has_live_runtime "${claude_refs[0]}"; then
-    existing_agent_health_reason="its Claude surface has no live terminal runtime"
-    return 1
-  fi
-  if ! wake_targets_surface "$target_amq_session" codex "${codex_ids[0]}"; then
-    existing_agent_health_reason="its Codex AMQ wake is not bound to the exact Codex surface"
-    return 1
-  fi
-  if ! wake_targets_surface "$target_amq_session" claude "${claude_ids[0]}"; then
-    existing_agent_health_reason="its Claude AMQ wake is not bound to the exact Claude surface"
-    return 1
-  fi
+  for agent in "${launch_agents[@]}"; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    if ! surface_has_live_runtime "$(agent_var_get "$agent" existing_ref)"; then
+      existing_agent_health_reason="its $agent_name surface has no live terminal runtime"
+      return 1
+    fi
+  done
+  for agent in "${launch_agents[@]}"; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    if ! wake_targets_surface "$target_amq_session" "$agent" "$(agent_var_get "$agent" existing_id)"; then
+      existing_agent_health_reason="its $agent_name AMQ wake is not bound to the exact $agent_name surface"
+      return 1
+    fi
+  done
 
-  process_status=0
-  surface_has_agent_process "${codex_refs[0]}" codex || process_status=$?
-  case "$process_status" in
-    0)
-      ;;
-    1)
-      existing_agent_health_reason="its Codex surface has no live Codex process"
-      return 1
-      ;;
-    *)
-      existing_agent_health_reason="its Codex process could not be inspected"
-      return 2
-      ;;
-  esac
-  process_status=0
-  surface_has_agent_process "${claude_refs[0]}" claude || process_status=$?
-  case "$process_status" in
-    0)
-      ;;
-    1)
-      existing_agent_health_reason="its Claude surface has no live Claude process"
-      return 1
-      ;;
-    *)
-      existing_agent_health_reason="its Claude process could not be inspected"
-      return 2
-      ;;
-  esac
+  for agent in "${launch_agents[@]}"; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    process_status=0
+    surface_has_agent_process "$(agent_var_get "$agent" existing_ref)" "$agent" || process_status=$?
+    case "$process_status" in
+      0)
+        ;;
+      1)
+        existing_agent_health_reason="its $agent_name surface has no live $agent_name process"
+        return 1
+        ;;
+      *)
+        existing_agent_health_reason="its $agent_name process could not be inspected"
+        return 2
+        ;;
+    esac
+  done
   return 0
 }
 
@@ -479,7 +489,7 @@ handle_existing_workspace_state() {
 
 retire_amq_session() {
   local session="$1"
-  local agents="${2:-codex,claude}"
+  local agents="${2:-$launch_retire_csv}"
   local session_root="$amq_base_root/$session"
   local retire_output
   if [[ ! -x "$keepalive_bin" ]]; then
@@ -507,7 +517,7 @@ retire_amq_session() {
 }
 
 retire_missing_workspace_session() {
-  retire_amq_session "$project" codex,claude
+  retire_amq_session "$project" "$launch_retire_csv"
 }
 
 allocate_amq_session() {
@@ -567,7 +577,7 @@ for name in ("Config", "Mailboxes"):
         problems.append(f"{name}={display_status} ({message})")
 
 mailboxes = {entry.get("handle"): entry for entry in result.get("mailboxes", [])}
-for handle in ("claude", "codex"):
+for handle in sys.argv[1:]:
     mailbox = mailboxes.get(handle)
     if mailbox is None:
         problems.append(f"required configured mailbox {handle} missing")
@@ -581,7 +591,7 @@ for handle in ("claude", "codex"):
 if problems:
     print("; ".join(problems))
     raise SystemExit(1)
-' <<<"$doctor_output"
+' "${launch_agents_roster[@]}" <<<"$doctor_output"
 }
 
 ensure_amq_session_initialized() {
@@ -600,10 +610,10 @@ ensure_amq_session_initialized() {
   fi
   if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
     printf 'would initialize AMQ session: %q init --root %q --agents %q\n' \
-      "$amq_bin" "$session_root" "claude,codex,user"
+      "$amq_bin" "$session_root" "$launch_roster_csv,user"
     return 0
   fi
-  if init_output=$("$amq_bin" init --root "$session_root" --agents claude,codex,user 2>&1); then
+  if init_output=$("$amq_bin" init --root "$session_root" --agents "$launch_roster_csv,user" 2>&1); then
     :
   else
     init_status=$?
@@ -633,13 +643,25 @@ if ! ensure_amq_session_initialized "$amq_session"; then
   exit 1
 fi
 
+# One (pane name, launcher word, boot name) triple per chosen agent, in pipeline
+# order. The boot name is empty unless the agent is named by a boot flag.
+layout_agent_args=()
+for agent in "${launch_agents[@]}"; do
+  agent_boot_name=""
+  if [[ "$(agent_field "$agent" rename_mode)" == "boot-flag" ]]; then
+    agent_boot_name="$agent-$amq_session"
+  fi
+  layout_agent_args+=("$(agent_field "$agent" surface_name)" "$(agent_var_get "$agent" launcher)" "$agent_boot_name")
+done
+
 layout=$(
-  /usr/bin/python3 - "$project" "$amq_session" "$workspace_root" "$codex_launcher" "$claude_launcher" <<'PY'
+  /usr/bin/python3 - "$amq_session" "$workspace_root" "${layout_agent_args[@]}" <<'PY'
 import json
 import shlex
 import sys
 
-project, amq_session, workspace_root, codex_launcher, claude_launcher = sys.argv[1:6]
+amq_session, workspace_root = sys.argv[1:3]
+agent_args = sys.argv[3:]
 # The launcher words are zsh functions/aliases in ~/.zshrc, so load them through zsh -ic.
 # Claude gets `--name claude-<session>` at boot. The explicit `--` follows the
 # portable amq_claude grammar and forwards the remaining args to `claude`, so the
@@ -660,21 +682,28 @@ def launch_inner(launcher, extra_args=""):
         command += " " + extra_args
     return command
 
-codex_inner = launch_inner(codex_launcher)
-claude_inner = launch_inner(
-    claude_launcher,
-    "-- --name " + shlex.quote(f"claude-{amq_session}"),
-)
-codex_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(codex_inner)}"
-claude_command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(claude_inner)}"
-layout = {
-    "direction": "horizontal",
-    "split": 0.5,
-    "children": [
-        {"pane": {"surfaces": [{"type": "terminal", "name": "Codex", "command": codex_command, "focus": True}]}},
-        {"pane": {"surfaces": [{"type": "terminal", "name": "Claude", "command": claude_command}]}},
-    ],
-}
+panes = []
+for index in range(0, len(agent_args), 3):
+    surface_name, launcher, boot_name = agent_args[index:index + 3]
+    extra_args = "-- --name " + shlex.quote(boot_name) if boot_name else ""
+    inner = launch_inner(launcher, extra_args)
+    surface = {
+        "type": "terminal",
+        "name": surface_name,
+        "command": f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(inner)}",
+    }
+    if not panes:
+        surface["focus"] = True
+    panes.append({"pane": {"surfaces": [surface]}})
+
+# cmux 0.64.25 accepts a bare pane as the layout root (probed 2026-10-04), so one
+# agent gets one pane and two agents get the side-by-side split.
+if len(panes) == 1:
+    layout = panes[0]
+elif len(panes) == 2:
+    layout = {"direction": "horizontal", "split": 0.5, "children": panes}
+else:
+    sys.exit(f"no pane layout is defined for {len(panes)} agents")
 print(json.dumps(layout, separators=(",", ":")))
 PY
 )
@@ -683,13 +712,24 @@ if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
   printf 'cmux workspace create --name %q --description %q --layout %q --focus true\n' \
     "$project" "Project launcher: $project (AMQ session: $amq_session)" "$layout"
   printf 'allocated AMQ session: %q\n' "$amq_session"
-  printf 'Claude session name (boot --name): %q\n' "claude-$amq_session"
-  printf 'post-boot Codex rename: %q then %q + send-key enter\n' "/rename" "codex-$amq_session"
+  for agent in "${launch_agents_roster[@]}"; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    case "$(agent_field "$agent" rename_mode)" in
+      boot-flag)
+        printf '%s session name (boot --name): %q\n' "$agent_name" "$agent-$amq_session"
+        ;;
+      post-boot)
+        printf 'post-boot %s rename: %q then %q + send-key enter\n' "$agent_name" "/rename" "$agent-$amq_session"
+        ;;
+    esac
+  done
   if [[ "$no_start" -eq 1 ]]; then
     printf 'no-start mode: workspace + rename only, no start commands sent\n'
   else
-    printf 'post-boot Codex send: %q + sleep %q + send-key enter, retry up to %q\n' "\$start $project" "$enter_delay_seconds" "$enter_retries"
-    printf 'post-boot Claude send: %q + sleep %q + send-key enter, retry up to %q\n' "/start $project" "$enter_delay_seconds" "$enter_retries"
+    for agent in "${launch_agents[@]}"; do
+      printf 'post-boot %s send: %q + sleep %q + send-key enter, retry up to %q\n' \
+        "$(agent_field "$agent" surface_name)" "$(agent_field "$agent" start_command) $project" "$enter_delay_seconds" "$enter_retries"
+    done
   fi
   exit 0
 fi
@@ -712,33 +752,36 @@ fi
 surface_rows=()
 surface_rows_output=""
 if ! surface_rows_output="$(workspace_surface_rows "$workspace_ref" both)"; then
-  echo "Could not inspect Codex and Claude surfaces in $workspace_ref" >&2
+  echo "Could not inspect $(launch_agent_names) surfaces in $workspace_ref" >&2
   exit 1
 fi
 while IFS= read -r row || [[ -n "$row" ]]; do
   [[ -n "$row" ]] && surface_rows+=("$row")
 done <<<"$surface_rows_output"
 
-codex_surfaces=()
-while IFS= read -r row || [[ -n "$row" ]]; do
-  codex_surfaces+=("$row")
-done < <(printf '%s\n' "${surface_rows[@]}" | surface_refs_for_name "Codex")
-claude_surfaces=()
-while IFS= read -r row || [[ -n "$row" ]]; do
-  claude_surfaces+=("$row")
-done < <(printf '%s\n' "${surface_rows[@]}" | surface_refs_for_name "Claude")
-codex_surface_ids=()
-while IFS= read -r row || [[ -n "$row" ]]; do
-  codex_surface_ids+=("$row")
-done < <(printf '%s\n' "${surface_rows[@]}" | surface_ids_for_name "Codex")
-claude_surface_ids=()
-while IFS= read -r row || [[ -n "$row" ]]; do
-  claude_surface_ids+=("$row")
-done < <(printf '%s\n' "${surface_rows[@]}" | surface_ids_for_name "Claude")
+# Each chosen agent owns exactly one surface, found by its pane name. The ref and
+# the id land in <agent>_surface and <agent>_surface_id.
+surfaces_resolved=1
+for agent in "${launch_agents[@]}"; do
+  agent_name="$(agent_field "$agent" surface_name)"
+  agent_surfaces=()
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    agent_surfaces+=("$row")
+  done < <(printf '%s\n' "${surface_rows[@]}" | surface_refs_for_name "$agent_name")
+  agent_surface_ids=()
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    agent_surface_ids+=("$row")
+  done < <(printf '%s\n' "${surface_rows[@]}" | surface_ids_for_name "$agent_name")
+  if [[ "${#agent_surfaces[@]}" -ne 1 || "${#agent_surface_ids[@]}" -ne 1 ]]; then
+    surfaces_resolved=0
+  else
+    agent_var_set "$agent" surface "${agent_surfaces[0]}"
+    agent_var_set "$agent" surface_id "${agent_surface_ids[0]}"
+  fi
+done
 
-if [[ "${#codex_surfaces[@]}" -ne 1 || "${#claude_surfaces[@]}" -ne 1 || \
-      "${#codex_surface_ids[@]}" -ne 1 || "${#claude_surface_ids[@]}" -ne 1 ]]; then
-  echo "Could not resolve unique Codex and Claude surface refs/ids by name in $workspace_ref" >&2
+if [[ "$surfaces_resolved" -ne 1 ]]; then
+  echo "Could not resolve unique $(launch_agent_names) surface refs/ids by name in $workspace_ref" >&2
   printf 'Surface rows:\n' >&2
   printf '%s\n' "${surface_rows[@]}" >&2
   "$cmux_bin" list-panes --workspace "$workspace_ref" >&2 || true
@@ -746,47 +789,40 @@ if [[ "${#codex_surfaces[@]}" -ne 1 || "${#claude_surfaces[@]}" -ne 1 || \
   exit 1
 fi
 
-codex_surface="${codex_surfaces[0]}"
-claude_surface="${claude_surfaces[0]}"
-codex_surface_id="${codex_surface_ids[0]}"
-claude_surface_id="${claude_surface_ids[0]}"
-
 agent_readiness_error() {
   local reason="$1"
-  local codex_debug
-  local claude_debug
-  local codex_screen
-  local claude_screen
-  codex_debug="$(surface_debug_block "$codex_surface")"
-  claude_debug="$(surface_debug_block "$claude_surface")"
-  codex_screen="$(read_surface_text "$codex_surface" || true)"
-  claude_screen="$(read_surface_text "$claude_surface" || true)"
+  local agent
+  local agent_name
+  local start_commands=""
+  local sessions_phrase="both agent sessions are"
+  local surface_lines=""
+  local debug_blocks=""
+  local screen_blocks=""
+  if [[ "${#launch_agents[@]}" -eq 1 ]]; then
+    sessions_phrase="the agent session is"
+  elif [[ "${#launch_agents[@]}" -gt 2 ]]; then
+    sessions_phrase="all agent sessions are"
+  fi
+  for agent in "${launch_agents[@]}"; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    start_commands="${start_commands:+$start_commands or }$(agent_field "$agent" start_command)"
+    surface_lines="$surface_lines$agent_name surface: $(agent_var_get "$agent" surface), expected screen regex: $(agent_var_get "$agent" ready_regex)"$'\n'
+    debug_blocks="$debug_blocks"$'\n'"$agent_name debug:"$'\n'"$(surface_debug_block "$(agent_var_get "$agent" surface)")"$'\n'
+    screen_blocks="$screen_blocks"$'\n'"$agent_name screen:"$'\n'"$(read_surface_text "$(agent_var_get "$agent" surface)" || true)"$'\n'
+  done
   cat >&2 <<ERR
-cmux created $workspace_ref, but the Codex/Claude tabs did not pass readiness checks.
+cmux created $workspace_ref, but the $(launch_agent_names /) tabs did not pass readiness checks.
 $reason
-Refusing to send \$start or /start until both agent sessions are confirmed.
+Refusing to send $start_commands until $sessions_phrase confirmed.
 
 AMQ session: $amq_session
-Codex surface: $codex_surface, expected screen regex: $codex_ready_regex
-Claude surface: $claude_surface, expected screen regex: $claude_ready_regex
-
+${surface_lines}
 If a screen dump below shows only zsh, inspect the --no-wake boot command.
 A visible agent banner instead indicates a readiness-regex
 or startup-timing mismatch, not a failed wake registration.
 Close stale cmux workspaces or restart cmux, then try again.
 Set CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE=1 to keep the failed workspace.
-
-Codex debug:
-$codex_debug
-
-Claude debug:
-$claude_debug
-
-Codex screen:
-$codex_screen
-
-Claude screen:
-$claude_screen
+${debug_blocks}${screen_blocks%$'\n'}
 ERR
 }
 
@@ -897,30 +933,24 @@ if [[ "$no_start" -eq 1 ]]; then
   launch_ok=1
 fi
 
-codex_ready=0
-claude_ready=0
-codex_not_ready_reason=""
-claude_not_ready_reason=""
-if wait_agent_ready "$codex_surface" "$codex_ready_regex"; then
-  codex_ready=1
-else
-  codex_not_ready_reason="$agent_not_ready_reason"
-fi
-if wait_agent_ready "$claude_surface" "$claude_ready_regex"; then
-  claude_ready=1
-else
-  claude_not_ready_reason="$agent_not_ready_reason"
-fi
+for agent in "${launch_agents[@]}"; do
+  agent_var_set "$agent" ready 0
+  agent_var_set "$agent" not_ready_reason ""
+  if wait_agent_ready "$(agent_var_get "$agent" surface)" "$(agent_var_get "$agent" ready_regex)"; then
+    agent_var_set "$agent" ready 1
+  else
+    agent_var_set "$agent" not_ready_reason "$agent_not_ready_reason"
+  fi
+done
 
 if [[ "$no_start" -ne 1 ]]; then
-  if [[ "$codex_ready" -ne 1 ]]; then
-    agent_readiness_error "Codex surface $codex_surface did not obtain a live runtime or show a recognized Codex banner."
-    exit 1
-  fi
-  if [[ "$claude_ready" -ne 1 ]]; then
-    agent_readiness_error "Claude surface $claude_surface did not obtain a live runtime or show a recognized Claude banner."
-    exit 1
-  fi
+  for agent in "${launch_agents[@]}"; do
+    if [[ "$(agent_var_get "$agent" ready)" -ne 1 ]]; then
+      agent_name="$(agent_field "$agent" surface_name)"
+      agent_readiness_error "$agent_name surface $(agent_var_get "$agent" surface) did not obtain a live runtime or show a recognized $agent_name banner."
+      exit 1
+    fi
+  done
 fi
 
 # Attach each ready agent on its own. 2026-09-23 Gate 4: cmux never reported a
@@ -928,32 +958,25 @@ fi
 # Claude pane without a wake as well, so the room had zero wakes.
 # A refused attach for one agent must not skip the other either: try every
 # ready agent first, then fail naming each refusal (2026-09-23 /audit F3).
-codex_attached=0
-claude_attached=0
 attach_failed_agents=()
-if [[ "$codex_ready" -eq 1 ]]; then
-  if attach_exact_wake codex "$codex_surface_id"; then
-    codex_attached=1
-  else
-    attach_failed_agents+=(codex)
+for agent in "${launch_agents[@]}"; do
+  agent_var_set "$agent" attached 0
+  if [[ "$(agent_var_get "$agent" ready)" -eq 1 ]]; then
+    if attach_exact_wake "$agent" "$(agent_var_get "$agent" surface_id)"; then
+      agent_var_set "$agent" attached 1
+    else
+      attach_failed_agents+=("$agent")
+    fi
   fi
-fi
-if [[ "$claude_ready" -eq 1 ]]; then
-  if attach_exact_wake claude "$claude_surface_id"; then
-    claude_attached=1
-  else
-    attach_failed_agents+=(claude)
-  fi
-fi
+done
 if [[ "${#attach_failed_agents[@]}" -gt 0 ]]; then
   # An attached wake was already baselined. Surface its pre-existing queue
   # before exiting so a one-sided attach failure cannot suppress that backlog.
-  if [[ "$codex_attached" -eq 1 ]] && ! notify_existing_backlog codex "$codex_surface_id"; then
-    echo "Codex wake attached, but its queued AMQ messages could not be surfaced after another attachment failed." >&2
-  fi
-  if [[ "$claude_attached" -eq 1 ]] && ! notify_existing_backlog claude "$claude_surface_id"; then
-    echo "Claude wake attached, but its queued AMQ messages could not be surfaced after another attachment failed." >&2
-  fi
+  for agent in "${launch_agents[@]}"; do
+    if [[ "$(agent_var_get "$agent" attached)" -eq 1 ]] && ! notify_existing_backlog "$agent" "$(agent_var_get "$agent" surface_id)"; then
+      echo "$(agent_field "$agent" surface_name) wake attached, but its queued AMQ messages could not be surfaced after another attachment failed." >&2
+    fi
+  done
   for failed_agent in "${attach_failed_agents[@]}"; do
     echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed for $failed_agent." >&2
   done
@@ -964,21 +987,25 @@ fi
 
 # Name the Codex thread post-boot. Claude was named at boot via
 # `claude --name claude-<session>` in the layout, so it needs no post-boot rename.
-codex_renamed=0
-codex_rename_failed=0
-if [[ "$codex_ready" -eq 1 ]]; then
-  if rename_thread "$codex_surface" "codex-$amq_session" codex; then
-    codex_renamed=1
-  elif [[ "$no_start" -ne 1 ]]; then
-    launch_ok=1
-    echo "Workspace $workspace_ref is live, but Codex did not confirm the name codex-$amq_session. No start prompts were sent." >&2
-    codex_rename_failed=1
+rename_failed=0
+for agent in "${launch_agents[@]}"; do
+  agent_var_set "$agent" renamed 0
+  [[ "$(agent_field "$agent" rename_mode)" == "post-boot" ]] || continue
+  agent_name="$(agent_field "$agent" surface_name)"
+  if [[ "$(agent_var_get "$agent" ready)" -eq 1 ]]; then
+    if rename_thread "$(agent_var_get "$agent" surface)" "$agent-$amq_session" "$agent"; then
+      agent_var_set "$agent" renamed 1
+    elif [[ "$no_start" -ne 1 ]]; then
+      launch_ok=1
+      echo "Workspace $workspace_ref is live, but $agent_name did not confirm the name $agent-$amq_session. No start prompts were sent." >&2
+      rename_failed=1
+    else
+      echo "Could not confirm the $agent_name thread was renamed to $agent-$amq_session; preserving the ad-hoc workspace." >&2
+    fi
   else
-    echo "Could not confirm the Codex thread was renamed to codex-$amq_session; preserving the ad-hoc workspace." >&2
+    echo "Skipping $agent_name rename because its surface did not become ready." >&2
   fi
-else
-  echo "Skipping Codex rename because its surface did not become ready." >&2
-fi
+done
 
 # rename_thread dismisses the dialog on its own failure paths, but the modal can
 # render AFTER that check and leave Codex sitting on "Type a name and press Enter",
@@ -986,73 +1013,94 @@ fi
 # the launcher reported a naming warning and exited 0 with the pane still blocked.
 # Re-verify here, escape whatever is still open, and refuse to claim a clean launch
 # if the pane stays blocked.
-codex_pane_blocked=0
-if [[ "$codex_ready" -eq 1 && "$codex_renamed" -ne 1 ]]; then
-  if ! dismiss_rename_dialog "$codex_surface" codex "codex-$amq_session"; then
-    codex_pane_blocked=1
+for agent in "${launch_agents[@]}"; do
+  agent_var_set "$agent" pane_blocked 0
+  [[ "$(agent_field "$agent" rename_mode)" == "post-boot" ]] || continue
+  if [[ "$(agent_var_get "$agent" ready)" -eq 1 && "$(agent_var_get "$agent" renamed)" -ne 1 ]]; then
+    if ! dismiss_rename_dialog "$(agent_var_get "$agent" surface)" "$agent" "$agent-$amq_session"; then
+      agent_var_set "$agent" pane_blocked 1
+    fi
   fi
-fi
+done
 
 # Surface queued work only after the Codex naming handshake is finished. An
 # earlier doorbell can be consumed as rename input and leave both operations in
 # an ambiguous state.
 backlog_ok=1
-if [[ "$codex_attached" -eq 1 ]] && ! notify_existing_backlog codex "$codex_surface_id"; then
-  backlog_ok=0
-fi
-if [[ "$backlog_ok" -eq 1 && "$claude_attached" -eq 1 ]] && ! notify_existing_backlog claude "$claude_surface_id"; then
-  backlog_ok=0
-fi
+for agent in "${launch_agents[@]}"; do
+  if [[ "$(agent_var_get "$agent" attached)" -eq 1 ]] && ! notify_existing_backlog "$agent" "$(agent_var_get "$agent" surface_id)"; then
+    backlog_ok=0
+    break
+  fi
+done
 if [[ "$backlog_ok" -ne 1 ]]; then
   launch_ok=1
   echo "Workspace $workspace_ref is live, but queued AMQ messages could not be surfaced. No start prompts were sent." >&2
   exit 1
 fi
 
-if [[ "$codex_pane_blocked" -eq 1 ]]; then
-  launch_ok=1
-  echo "Codex is stuck in its rename dialog on $codex_surface and cannot receive AMQ messages; press escape in that pane. Preserving $workspace_ref." >&2
-  exit 1
-fi
+for agent in "${launch_agents[@]}"; do
+  if [[ "$(agent_var_get "$agent" pane_blocked)" -eq 1 ]]; then
+    launch_ok=1
+    echo "$(agent_field "$agent" surface_name) is stuck in its rename dialog on $(agent_var_get "$agent" surface) and cannot receive AMQ messages; press escape in that pane. Preserving $workspace_ref." >&2
+    exit 1
+  fi
+done
 
-if [[ "$codex_rename_failed" -eq 1 ]]; then
+if [[ "$rename_failed" -eq 1 ]]; then
   exit 1
 fi
 
 # Only --no-start reaches this point with an agent that never became ready.
 # Exiting 0 here reported a launched room that had no working AMQ wake.
-if [[ "$codex_attached" -ne 1 || "$claude_attached" -ne 1 ]]; then
+attach_incomplete=0
+for agent in "${launch_agents[@]}"; do
+  if [[ "$(agent_var_get "$agent" attached)" -ne 1 ]]; then
+    attach_incomplete=1
+    agent_not_ready_detail="$(agent_var_get "$agent" not_ready_reason)"
+    echo "$(agent_field "$agent" surface_name) AMQ wake was not attached: ${agent_not_ready_detail:-its surface did not become ready}. Messages to $agent remain queued." >&2
+  fi
+done
+if [[ "$attach_incomplete" -eq 1 ]]; then
   launch_ok=1
-  if [[ "$codex_attached" -ne 1 ]]; then
-    echo "Codex AMQ wake was not attached: ${codex_not_ready_reason:-its surface did not become ready}. Messages to codex remain queued." >&2
-  fi
-  if [[ "$claude_attached" -ne 1 ]]; then
-    echo "Claude AMQ wake was not attached: ${claude_not_ready_reason:-its surface did not become ready}. Messages to claude remain queued." >&2
-  fi
   echo "Preserving $workspace_ref, but the launch is incomplete. No start prompts were sent." >&2
   exit 1
 fi
 
 if [[ "$no_start" -eq 1 ]]; then
   launch_ok=1
-  if [[ "$codex_renamed" -eq 1 && "$claude_ready" -eq 1 ]]; then
-    echo "Launched ad-hoc workspace $amq_session in $workspace_ref (Claude name requested at boot; Codex rename confirmed; no /start sent)"
+  # Naming summary in roster order: what each launched agent's session name rests on.
+  naming_complete=1
+  naming_summary=""
+  for agent in "${launch_agents_roster[@]}"; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    case "$(agent_field "$agent" rename_mode)" in
+      boot-flag)
+        [[ "$(agent_var_get "$agent" ready)" -eq 1 ]] || naming_complete=0
+        naming_summary="$naming_summary$agent_name name requested at boot; "
+        ;;
+      post-boot)
+        [[ "$(agent_var_get "$agent" renamed)" -eq 1 ]] || naming_complete=0
+        naming_summary="$naming_summary$agent_name rename confirmed; "
+        ;;
+    esac
+  done
+  if [[ "$naming_complete" -eq 1 ]]; then
+    echo "Launched ad-hoc workspace $amq_session in $workspace_ref (${naming_summary}no /start sent)"
   else
     echo "Launched ad-hoc workspace $amq_session in $workspace_ref (session naming incomplete; no /start sent)"
   fi
   exit 0
 fi
 
-if ! submit_prompt "$codex_surface" "\$start $project" codex; then
-  launch_ok=1
-  echo "Launched $project in $workspace_ref using AMQ session $amq_session, but could not confirm Codex submitted \$start." >&2
-  exit 1
-fi
-if ! submit_prompt "$claude_surface" "/start $project" claude; then
-  launch_ok=1
-  echo "Launched $project in $workspace_ref using AMQ session $amq_session, but could not confirm Claude submitted /start." >&2
-  exit 1
-fi
+for agent in "${launch_agents[@]}"; do
+  start_command="$(agent_field "$agent" start_command)"
+  if ! submit_prompt "$(agent_var_get "$agent" surface)" "$start_command $project" "$agent"; then
+    launch_ok=1
+    echo "Launched $project in $workspace_ref using AMQ session $amq_session, but could not confirm $(agent_field "$agent" surface_name) submitted $start_command." >&2
+    exit 1
+  fi
+done
 
 launch_ok=1
 echo "Launched $project in $workspace_ref using AMQ session $amq_session"

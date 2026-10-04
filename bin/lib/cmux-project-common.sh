@@ -45,6 +45,132 @@ validate_launcher_word() {
   fi
 }
 
+# Agent descriptor: every agent-specific value the launch pipeline needs. Adding an
+# agent means adding arms here, not a new branch at each call site. bash 3.2 has no
+# associative arrays, hence the case table.
+#   agent_field <agent> <field>   prints the value; an unknown pair returns 1, no output.
+# Two orders exist and both are contracts. The roster order is what `amq init
+# --agents` and the naming summaries use. The pipeline order is the pane order and
+# the order of every readiness, attach, rename and start step.
+known_agents_roster=(claude codex)
+known_agents_pipeline=(codex claude)
+
+agent_field() {
+  case "$1:$2" in
+    codex:surface_name) printf '%s' 'Codex' ;;
+    # post-boot: renamed with /rename <agent>-<session> once the TUI is up.
+    codex:rename_mode) printf '%s' 'post-boot' ;;
+    codex:start_command) printf '%s' "\$start" ;;
+    codex:process_regex) printf '%s' '(^|[[:space:]/])(codex|codex-pretty)([[:space:]]|$)' ;;
+    codex:activity_regex) printf '%s' 'Working|Explored|Ran |Read |Using the ' ;;
+    claude:surface_name) printf '%s' 'Claude' ;;
+    # boot-flag: named by `-- --name <agent>-<session>` in the pane command.
+    claude:rename_mode) printf '%s' 'boot-flag' ;;
+    claude:start_command) printf '%s' '/start' ;;
+    claude:process_regex) printf '%s' '(^|[[:space:]/])claude([[:space:]]|$)' ;;
+    claude:activity_regex) printf '%s' 'Running [0-9]+ shell command|Brewed for|thought for|Read |Wrote|Updated' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Per-agent state without associative arrays: `agent_var_set codex surface X` stores
+# $codex_surface, the same names the pipeline used when the pair was hardcoded.
+agent_var_set() {
+  printf -v "${1}_${2}" '%s' "$3"
+}
+
+agent_var_get() {
+  local agent_var_name="${1}_${2}"
+  printf '%s' "${!agent_var_name:-}"
+}
+
+# parse_agent_roster <csv> validates the chosen agents and sets:
+#   launch_agents         the chosen agents in pipeline order
+#   launch_agents_roster  the same set in roster order
+#   launch_roster_csv     roster order, comma-separated, for `amq init --agents`
+#   launch_retire_csv     pipeline order, comma-separated, for retire-session --agents
+# The order the caller wrote is irrelevant. Returns 1 with the reason in
+# agent_roster_error; agent_roster_reason prints it.
+agent_roster_error=""
+agent_roster_reason() {
+  printf '%s' "$agent_roster_error"
+}
+
+parse_agent_roster() {
+  local csv="$1"
+  local agent
+  local chosen=","
+  local old_ifs
+  local -a requested_agents
+  requested_agents=()
+  launch_agents=()
+  launch_agents_roster=()
+  launch_roster_csv=""
+  launch_retire_csv=""
+  agent_roster_error=""
+
+  if [[ -z "$csv" ]]; then
+    agent_roster_error="it is empty"
+    return 1
+  fi
+  if [[ ! "$csv" =~ ^[a-z]+(,[a-z]+)*$ ]]; then
+    agent_roster_error="it is not a comma-separated list of agent names: $csv"
+    return 1
+  fi
+  old_ifs="$IFS"
+  IFS=','
+  # Intentional splitting of the validated comma-separated list.
+  # shellcheck disable=SC2206
+  requested_agents=($csv)
+  IFS="$old_ifs"
+  for agent in "${requested_agents[@]}"; do
+    if ! agent_field "$agent" surface_name >/dev/null; then
+      agent_roster_error="unknown agent: $agent"
+      return 1
+    fi
+    if [[ "$chosen" == *",$agent,"* ]]; then
+      agent_roster_error="agent listed twice: $agent"
+      return 1
+    fi
+    chosen="$chosen$agent,"
+  done
+  for agent in "${known_agents_pipeline[@]}"; do
+    if [[ "$chosen" == *",$agent,"* ]]; then
+      launch_agents+=("$agent")
+      launch_retire_csv="${launch_retire_csv:+$launch_retire_csv,}$agent"
+    fi
+  done
+  for agent in "${known_agents_roster[@]}"; do
+    if [[ "$chosen" == *",$agent,"* ]]; then
+      launch_agents_roster+=("$agent")
+      launch_roster_csv="${launch_roster_csv:+$launch_roster_csv,}$agent"
+    fi
+  done
+}
+
+# "Codex", "Codex and Claude", "Codex, Claude and Grok": the chosen agents' pane
+# names in pipeline order, joined for messages. $1 overrides the last joiner.
+launch_agent_names() {
+  local last_joiner="${1:- and }"
+  local agent
+  local name
+  local joined=""
+  local index=0
+  local last=$(( ${#launch_agents[@]} - 1 ))
+  for agent in "${launch_agents[@]}"; do
+    name="$(agent_field "$agent" surface_name)"
+    if [[ "$index" -eq 0 ]]; then
+      joined="$name"
+    elif [[ "$index" -eq "$last" ]]; then
+      joined="$joined$last_joiner$name"
+    else
+      joined="$joined, $name"
+    fi
+    index=$((index + 1))
+  done
+  printf '%s' "$joined"
+}
+
 extract_cmux_refs() {
   local prefix="$1"
   grep -Eo "${prefix}:[^[:space:]]+" || true
@@ -155,17 +281,7 @@ surface_has_agent_process() {
   if ! processes="$("${ps_bin:-/bin/ps}" -ww -t "$tty" -o args= 2>/dev/null)"; then
     return 2
   fi
-  case "$agent" in
-    codex)
-      process_regex='(^|[[:space:]/])(codex|codex-pretty)([[:space:]]|$)'
-      ;;
-    claude)
-      process_regex='(^|[[:space:]/])claude([[:space:]]|$)'
-      ;;
-    *)
-      return 2
-      ;;
-  esac
+  process_regex="$(agent_field "$agent" process_regex)" || return 2
   grep -Eq "$process_regex" <<<"$processes"
 }
 
@@ -388,7 +504,7 @@ wake_lock_active() {
   local pid_status
   local command_line
   [[ -z "${amq_base_root:-}" ]] && return 1
-  for agent in codex claude; do
+  for agent in "${known_agents_pipeline[@]}"; do
     lock="$amq_base_root/$session/agents/$agent/.wake.lock"
     [[ -f "$lock" ]] || continue
     pid_status=0
@@ -829,11 +945,9 @@ wait_for_surface_literals() {
 
 agent_activity_marker_regex() {
   local agent="$1"
-  if [[ "$agent" == "codex" ]]; then
-    printf '%s\n' 'Working|Explored|Ran |Read |Using the '
-  else
-    printf '%s\n' 'Running [0-9]+ shell command|Brewed for|thought for|Read |Wrote|Updated'
-  fi
+  # An agent without its own markers keeps the historical fallback to Claude's.
+  agent_field "$agent" activity_regex || agent_field claude activity_regex
+  printf '\n'
 }
 
 visible_input_region() {

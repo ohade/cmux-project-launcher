@@ -135,16 +135,27 @@ case "$cmd" in
         expected_project="${CMUX_FAKE_EXPECT_PROJECT:-demo-project}"
         [[ "$workspace_name" == "$expected_project" ]]
         [[ "$description" == "Project launcher: $expected_project (AMQ session: $expected_session)" ]]
-        [[ "$layout" == *"amq_codex $expected_session"* ]]
-        [[ "$layout" == *"amq_claude $expected_session"* ]]
+        # CMUX_FAKE_AGENT_ROSTER names the agents this fake workspace holds; the
+        # default is the Codex + Claude pair every pre-roster case launches.
+        fake_roster=",${CMUX_FAKE_AGENT_ROSTER:-codex,claude},"
+        if [[ "$fake_roster" == *",codex,"* ]]; then
+          [[ "$layout" == *"amq_codex $expected_session"* ]]
+          # Codex has no boot flag, so its command must NOT carry a --name.
+          [[ "$layout" != *"amq_codex $expected_session --name"* ]]
+        else
+          [[ "$layout" != *"amq_codex"* ]]
+        fi
+        if [[ "$fake_roster" == *",claude,"* ]]; then
+          [[ "$layout" == *"amq_claude $expected_session"* ]]
+          # Claude is named at boot via `--name claude-<session>` forwarded through amq_claude.
+          [[ "$layout" == *"amq_claude $expected_session -- --name claude-$expected_session"* ]]
+        else
+          [[ "$layout" != *"amq_claude"* ]]
+        fi
         [[ "$layout" == *"AMQ_COOP_WAKE_FLAG=--no-wake"* ]]
         [[ "$layout" != *"AMQ_COOP_WAKE_FLAG=--defer-wake"* ]]
         [[ "$layout" == *"AMQ_KEEPALIVE_DISABLED=1"* ]]
         [[ "$layout" != *"AMQ_KEEPALIVE_BIN="* ]]
-        # Claude is named at boot via `--name claude-<session>` forwarded through amq_claude.
-        [[ "$layout" == *"amq_claude $expected_session -- --name claude-$expected_session"* ]]
-        # Codex has no boot flag, so its command must NOT carry a --name.
-        [[ "$layout" != *"amq_codex $expected_session --name"* ]]
         [[ "$layout" != *"coopcodex $expected_session"* ]]
         [[ "$layout" != *"coopcc $expected_session"* ]]
         [[ "$layout" != *"amq coop exec"* ]]
@@ -245,8 +256,18 @@ JSON
     printf '1: window:2\n'
     ;;
   list-panes)
-    printf '* pane:12 [1 surface] [focused]\n'
-    printf 'pane:11 [1 surface]\n'
+    case "${CMUX_FAKE_AGENT_ROSTER:-codex,claude}" in
+      codex)
+        printf '* pane:11 [1 surface] [focused]\n'
+        ;;
+      claude)
+        printf '* pane:12 [1 surface] [focused]\n'
+        ;;
+      *)
+        printf '* pane:12 [1 surface] [focused]\n'
+        printf 'pane:11 [1 surface]\n'
+        ;;
+    esac
     ;;
   list-pane-surfaces)
     pane=""
@@ -283,7 +304,13 @@ JSON
         ;;
       "")
         # Real cmux defaults to the focused pane when --pane is omitted.
-        if [[ "$id_format" == "both" ]]; then
+        if [[ "${CMUX_FAKE_AGENT_ROSTER:-codex,claude}" == "codex" ]]; then
+          if [[ "$id_format" == "both" ]]; then
+            printf '* surface:26 11111111-1111-4111-8111-111111111111 Codex [selected]\n'
+          else
+            printf '* surface:26 Codex [selected]\n'
+          fi
+        elif [[ "$id_format" == "both" ]]; then
           printf '* surface:27 22222222-2222-4222-8222-222222222222 Claude [selected]\n'
         else
           printf '* surface:27 Claude [selected]\n'
@@ -460,12 +487,17 @@ JSON
       printf '[1] surface:27 "Claude" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:12\n' "$runtime_workspace"
       printf '    runtime=1 focused=0 selected=1 terminal=0x3 ghostty=0x4\n'
     else
-      printf '[0] surface:26 "Codex" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:11\n' "$runtime_workspace"
-      printf '    runtime=1 focused=1 selected=1 terminal=0x1 ghostty=0x2\n'
-      printf '    tty=ttys026 cwd=/Users/example/git\n'
-      printf '[1] surface:27 "Claude" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:12\n' "$runtime_workspace"
-      printf '    runtime=1 focused=0 selected=1 terminal=0x3 ghostty=0x4\n'
-      printf '    tty=ttys027 cwd=/Users/example/git\n'
+      fake_roster=",${CMUX_FAKE_AGENT_ROSTER:-codex,claude},"
+      if [[ "$fake_roster" == *",codex,"* ]]; then
+        printf '[0] surface:26 "Codex" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:11\n' "$runtime_workspace"
+        printf '    runtime=1 focused=1 selected=1 terminal=0x1 ghostty=0x2\n'
+        printf '    tty=ttys026 cwd=/Users/example/git\n'
+      fi
+      if [[ "$fake_roster" == *",claude,"* ]]; then
+        printf '[1] surface:27 "Claude" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:12\n' "$runtime_workspace"
+        printf '    runtime=1 focused=0 selected=1 terminal=0x3 ghostty=0x4\n'
+        printf '    tty=ttys027 cwd=/Users/example/git\n'
+      fi
     fi
     ;;
   focus-pane|refresh-surfaces)
@@ -569,7 +601,7 @@ JSON
       esac
     done
     [[ -n "$root" ]]
-    [[ "$agents" == "claude,codex,user" ]]
+    [[ "$agents" == "${CMUX_FAKE_EXPECT_ROSTER:-claude,codex,user}" ]]
     if [[ -n "${CMUX_PROJECT_LAUNCHER_REAL_AMQ:-}" ]]; then
       "$CMUX_PROJECT_LAUNCHER_REAL_AMQ" init "${original_args[@]}"
     else
@@ -589,7 +621,8 @@ JSON
           "$root/agents/$agent/receipts"
       done
       IFS="$old_ifs"
-      printf '{"agents":["claude","codex","user"]}\n' >"$root/meta/config.json"
+      config_agents="$(printf '%s' "$agents" | sed 's/,/","/g')"
+      printf '{"agents":["%s"]}\n' "$config_agents" >"$root/meta/config.json"
     fi
     printf 'init\t%s\t%s\n' "$root" "$agents" >>"${CMUX_FAKE_EVENT_LOG:?}"
     ;;
@@ -2860,5 +2893,187 @@ fi
 grep -Fq 'demo-project' "$create_log"
 grep -Fq 'workspace:10' "$close_log"
 grep -Fq 'runtime=0' "$tmp_dir/stderr.log"
+
+# Agent roster: CMUX_PROJECT_LAUNCHER_AGENTS picks which agents a project launches
+# with. Unset means the Codex + Claude pair pinned by the golden capture above.
+
+# An unusable roster stops before any AMQ or cmux mutation.
+for bad_roster in 'claude,nosuchagent' 'claude,claude' ''; do
+  : >"$send_log"
+  : >"$key_log"
+  : >"$event_log"
+  : >"$create_log"
+  roster_status=0
+  CMUX_PROJECT_LAUNCHER_AGENTS="$bad_roster" \
+    CMUX_FAKE_EXPECT_SESSION=roster-invalid \
+    CMUX_FAKE_EXPECT_PROJECT=roster-invalid \
+    CMUX_FAKE_SEND_LOG="$send_log" \
+    CMUX_FAKE_KEY_LOG="$key_log" \
+    CMUX_FAKE_CREATE_LOG="$create_log" \
+    CMUX_FAKE_SELECT_LOG="$select_log" \
+    CMUX_FAKE_OPEN_LOG="$open_log" \
+    CMUX_FAKE_CLOSE_LOG="$close_log" \
+    CMUX_PROJECT_LAUNCHER_POLL=1 \
+    CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" roster-invalid >"$stdout_log" 2>"$tmp_dir/stderr.log" || roster_status=$?
+  if [[ "$roster_status" -ne 2 ]]; then
+    printf 'agent roster "%s" exited %s, expected 2\n' "$bad_roster" "$roster_status" >&2
+    exit 1
+  fi
+  grep -Fq 'CMUX_PROJECT_LAUNCHER_AGENTS' "$tmp_dir/stderr.log"
+  [[ ! -s "$event_log" ]]
+  [[ ! -s "$create_log" ]]
+  [[ ! -s "$send_log" ]]
+  [[ ! -e "$fake_amq_root/roster-invalid" ]]
+done
+
+# Claude alone: one pane, a claude-only room, one exact wake, /start to Claude only.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$layout_log"
+: >"$close_log"
+CMUX_PROJECT_LAUNCHER_AGENTS=claude \
+  CMUX_FAKE_AGENT_ROSTER=claude \
+  CMUX_FAKE_EXPECT_ROSTER=claude,user \
+  CMUX_FAKE_EXPECT_SESSION=solo-claude \
+  CMUX_FAKE_EXPECT_PROJECT=solo-claude \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_LAYOUT_LOG="$layout_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT=/Users/example/git \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+  $launch_bash "$repo_root/bin/cmux-project-launch" solo-claude >"$stdout_log"
+
+cat >"$expected_layout_log" <<'GOLDEN'
+Project launcher: solo-claude (AMQ session: solo-claude)
+{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude solo-claude -- --name claude-solo-claude'","focus":true}]}}
+GOLDEN
+if ! cmp -s "$expected_layout_log" "$layout_log"; then
+  printf 'claude-only launch description/layout is wrong:\n' >&2
+  diff "$expected_layout_log" "$layout_log" >&2 || true
+  exit 1
+fi
+grep -Fxq $'init\t'"$fake_amq_root/solo-claude"$'\tclaude,user' "$event_log"
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+grep -Fq $'reattach\tclaude\tcmux:surface:22222222-2222-4222-8222-222222222222' "$event_log"
+grep -Fq $'surface:27\t/start solo-claude' "$send_log"
+if grep -Fq 'surface:26' "$send_log" "$key_log" || grep -Fq '/rename' "$send_log"; then
+  printf 'claude-only launch touched a Codex surface or sent a rename\n' >&2
+  exit 1
+fi
+grep -Fq 'Launched solo-claude in workspace:10' "$stdout_log"
+[[ ! -s "$close_log" ]]
+
+# Codex alone: one pane, a codex-only room, the post-boot rename, $start to Codex only.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$layout_log"
+: >"$close_log"
+CMUX_PROJECT_LAUNCHER_AGENTS=codex \
+  CMUX_FAKE_AGENT_ROSTER=codex \
+  CMUX_FAKE_EXPECT_ROSTER=codex,user \
+  CMUX_FAKE_EXPECT_SESSION=solo-codex \
+  CMUX_FAKE_EXPECT_PROJECT=solo-codex \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_LAYOUT_LOG="$layout_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT=/Users/example/git \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+  $launch_bash "$repo_root/bin/cmux-project-launch" solo-codex >"$stdout_log"
+
+cat >"$expected_layout_log" <<'GOLDEN'
+Project launcher: solo-codex (AMQ session: solo-codex)
+{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex solo-codex'","focus":true}]}}
+GOLDEN
+if ! cmp -s "$expected_layout_log" "$layout_log"; then
+  printf 'codex-only launch description/layout is wrong:\n' >&2
+  diff "$expected_layout_log" "$layout_log" >&2 || true
+  exit 1
+fi
+grep -Fxq $'init\t'"$fake_amq_root/solo-codex"$'\tcodex,user' "$event_log"
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
+grep -Fq $'reattach\tcodex\tcmux:surface:11111111-1111-4111-8111-111111111111' "$event_log"
+grep -Fq $'surface:26\t/rename' "$send_log"
+grep -Fq $'surface:26\tcodex-solo-codex' "$send_log"
+# shellcheck disable=SC2016
+grep -Fq $'surface:26\t$start solo-codex' "$send_log"
+if grep -Fq 'surface:27' "$send_log" "$key_log"; then
+  printf 'codex-only launch touched a Claude surface\n' >&2
+  exit 1
+fi
+grep -Fq 'Launched solo-codex in workspace:10' "$stdout_log"
+[[ ! -s "$close_log" ]]
+
+# The roster is a set: its written order changes neither the room nor the layout.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$layout_log"
+: >"$close_log"
+CMUX_PROJECT_LAUNCHER_AGENTS=codex,claude \
+  CMUX_FAKE_EXPECT_SESSION=roster-order \
+  CMUX_FAKE_EXPECT_PROJECT=roster-order \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_LAYOUT_LOG="$layout_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT=/Users/example/git \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+  $launch_bash "$repo_root/bin/cmux-project-launch" roster-order >"$stdout_log"
+
+cat >"$expected_layout_log" <<'GOLDEN'
+Project launcher: roster-order (AMQ session: roster-order)
+{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex roster-order'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude roster-order -- --name claude-roster-order'"}]}}]}
+GOLDEN
+if ! cmp -s "$expected_layout_log" "$layout_log"; then
+  printf 'codex,claude launch description/layout is wrong:\n' >&2
+  diff "$expected_layout_log" "$layout_log" >&2 || true
+  exit 1
+fi
+grep -Fxq $'init\t'"$fake_amq_root/roster-order"$'\tclaude,codex,user' "$event_log"
+grep -Fq 'Launched roster-order in workspace:10' "$stdout_log"
+
+# --no-start names only the agents that were launched.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$close_log"
+CMUX_PROJECT_LAUNCHER_AGENTS=claude \
+  CMUX_FAKE_AGENT_ROSTER=claude \
+  CMUX_FAKE_EXPECT_ROSTER=claude,user \
+  CMUX_FAKE_EXPECT_SESSION=solo-claude-adhoc \
+  CMUX_FAKE_EXPECT_PROJECT=solo-claude-adhoc \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+  $launch_bash "$repo_root/bin/cmux-project-launch" --no-start solo-claude-adhoc >"$stdout_log"
+grep -Fxq 'Launched ad-hoc workspace solo-claude-adhoc in workspace:10 (Claude name requested at boot; no /start sent)' "$stdout_log"
+[[ ! -s "$send_log" ]]
+[[ "$(awk -F '\t' '$1 == "reattach" { count++ } END { print count + 0 }' "$event_log")" -eq 1 ]]
 
 printf 'ok - cmux project launch shell fixtures passed\n'
