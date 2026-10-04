@@ -19,6 +19,10 @@ struct CmuxProjectLauncherApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
+
+        Settings {
+            AgentSettingsView(model: model)
+        }
     }
 }
 
@@ -68,17 +72,55 @@ final class LauncherViewModel: ObservableObject {
     @Published var closingAdHocWorkspace: String?
     @Published var adHocWorkspaces: [AdHocWorkspace] = []
     @Published var screen: LauncherScreen = .projects
+    /// The agents a new room starts with, set in Settings.
+    @Published var defaultAgents: AgentSelection {
+        didSet {
+            agentStore.defaultSelection = defaultAgents
+        }
+    }
 
     private let store: ProgressProjectStore
     private let launcher: CmuxLauncher
+    private let agentStore: AgentSelectionStore
     private static let sortModeDefaultsKey = "projectSortMode"
 
-    init(store: ProgressProjectStore = ProgressProjectStore(), launcher: CmuxLauncher = CmuxLauncher()) {
+    init(
+        store: ProgressProjectStore = ProgressProjectStore(),
+        launcher: CmuxLauncher = CmuxLauncher(),
+        agentStore: AgentSelectionStore = AgentSelectionStore()
+    ) {
         self.store = store
         self.launcher = launcher
+        self.agentStore = agentStore
         let savedSortMode = UserDefaults.standard.string(forKey: Self.sortModeDefaultsKey)
             .flatMap(ProjectSortMode.init(rawValue:))
         self.sortMode = savedSortMode ?? .lastTouched
+        self.defaultAgents = agentStore.defaultSelection
+    }
+
+    /// The project's own agent choice, or nil when it has none. Without a choice the
+    /// launch script keeps an existing room's agents and uses the default for a new room.
+    func agentSelection(for projectName: String) -> AgentSelection? {
+        agentStore.selection(for: projectName)
+    }
+
+    /// Toggles one agent for the selected project. A project without its own choice
+    /// starts from the default.
+    func toggleAgent(_ agent: AgentKind) {
+        guard let projectName = selectedProject?.name else { return }
+        let current = agentSelection(for: projectName) ?? defaultAgents
+        objectWillChange.send()
+        agentStore.setSelection(current.toggling(agent), for: projectName)
+    }
+
+    func clearAgentSelection() {
+        guard let projectName = selectedProject?.name else { return }
+        objectWillChange.send()
+        agentStore.setSelection(nil, for: projectName)
+    }
+
+    func toggleDefaultAgent(_ agent: AgentKind) {
+        defaultAgents = defaultAgents.toggling(agent)
     }
 
     var visibleProjects: [ProjectTile] {
@@ -338,11 +380,13 @@ final class LauncherViewModel: ObservableObject {
     func launch(projectName: String) {
         guard launchingProject == nil else { return }
         let launcher = self.launcher
+        let agents = agentSelection(for: projectName)
+        let defaultAgents = self.defaultAgents
         launchingProject = projectName
         statusText = "Launching \(projectName) in cmux"
         Task.detached {
             do {
-                let output = try launcher.launch(project: projectName)
+                let output = try launcher.launch(project: projectName, agents: agents, defaultAgents: defaultAgents)
                 await MainActor.run {
                     self.launchingProject = nil
                     if output.hasPrefix("Reattached ") {
@@ -365,11 +409,12 @@ final class LauncherViewModel: ObservableObject {
         guard creatingAdHocWorkspace == nil else { return }
         let name = Self.randomAdHocName()
         let launcher = self.launcher
+        let defaultAgents = self.defaultAgents
         creatingAdHocWorkspace = name
         statusText = "Launching \(name)"
         Task.detached {
             do {
-                let output = try launcher.launchAdHoc(name: name)
+                let output = try launcher.launchAdHoc(name: name, defaultAgents: defaultAgents)
                 let workspaceRef = Self.workspaceRef(from: output) ?? name
                 await MainActor.run {
                     self.creatingAdHocWorkspace = nil
@@ -568,6 +613,38 @@ struct LauncherView: View {
         }
     }
 
+    private var agentsMenu: some View {
+        let ownChoice = model.selectedProject.flatMap { model.agentSelection(for: $0.name) }
+        let shown = ownChoice ?? model.defaultAgents
+        return Menu {
+            if ownChoice == nil {
+                Text("Not chosen yet: an existing room keeps its agents; a new room starts with \(model.defaultAgents.title).")
+                Divider()
+            }
+            ForEach(AgentKind.allCases) { agent in
+                Button {
+                    model.toggleAgent(agent)
+                } label: {
+                    if shown.contains(agent) {
+                        Label(agent.title, systemImage: "checkmark")
+                    } else {
+                        Text(agent.title)
+                    }
+                }
+            }
+            Divider()
+            Button("Use Default") {
+                model.clearAgentSelection()
+            }
+            .disabled(ownChoice == nil)
+        } label: {
+            Label("Agents: \(ownChoice?.title ?? "Default")", systemImage: "person.2")
+        }
+        .frame(minWidth: 150, alignment: .leading)
+        .disabled(model.selectedProject == nil || model.listMode == .archive)
+        .fastHelp("Choose which agents the selected project launches with, saved per project. Change the default in Settings.")
+    }
+
     private var toolbar: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
@@ -653,6 +730,8 @@ struct LauncherView: View {
                     }
                     .frame(minWidth: 150, alignment: .leading)
                     .fastHelp("Filter projects by Auto worktree: playground is Personal; configured work roots are Production.")
+
+                    agentsMenu
 
                     TextField("Search projects", text: $model.query)
                         .textFieldStyle(.roundedBorder)
@@ -971,6 +1050,31 @@ struct LoadingPlaceholder: View {
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.92))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(message)
+    }
+}
+
+struct AgentSettingsView: View {
+    @ObservedObject var model: LauncherViewModel
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(AgentKind.allCases) { agent in
+                    Toggle(agent.title, isOn: Binding(
+                        get: { model.defaultAgents.contains(agent) },
+                        set: { _ in model.toggleDefaultAgent(agent) }
+                    ))
+                }
+            } header: {
+                Text("Default agents")
+            } footer: {
+                Text("A new room starts with these agents. A project with its own choice in the Agents menu keeps it, and an existing room keeps its agents. At least one agent stays selected.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420)
+        .padding(.vertical, 8)
     }
 }
 

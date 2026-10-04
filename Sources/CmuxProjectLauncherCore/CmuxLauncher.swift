@@ -130,18 +130,25 @@ public struct CmuxLauncher: Sendable {
         return LauncherRuntimeDefaults.expandedPath("~/.claude/skills/start/scripts/commit-progress.sh")
     }
 
+    /// `agents` is the project's own choice, or nil when it has none.
     @discardableResult
-    public func launch(project: String) throws -> String {
+    public func launch(
+        project: String,
+        agents: AgentSelection? = nil,
+        defaultAgents: AgentSelection = .builtInDefault
+    ) throws -> String {
         try ProgressProjectStore.validateProjectName(project)
         guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
             throw CmuxLauncherError.scriptMissing(scriptPath)
         }
+        let agentEnvironment = Self.agentEnvironment(agents: agents, defaultAgents: defaultAgents)
         return try run(
             executablePath: scriptPath,
             arguments: [project],
-            environment: [
+            environment: agentEnvironment.overrides.merging([
                 "CMUX_PROJECT_LAUNCHER_CMUX": cmuxPath,
-            ]
+            ]) { _, launcherValue in launcherValue },
+            removingEnvironment: agentEnvironment.removing
         )
     }
 
@@ -203,8 +210,9 @@ public struct CmuxLauncher: Sendable {
         return output
     }
 
+    /// An ad-hoc workspace always gets a new room, so it launches the default agents.
     @discardableResult
-    public func launchAdHoc(name: String) throws -> String {
+    public func launchAdHoc(name: String, defaultAgents: AgentSelection = .builtInDefault) throws -> String {
         try ProgressProjectStore.validateProjectName(name)
         guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
             throw CmuxLauncherError.scriptMissing(scriptPath)
@@ -212,12 +220,14 @@ public struct CmuxLauncher: Sendable {
         // Route ad-hoc through the launch script in --no-start mode so the scratch
         // workspace gets the same session renaming (Claude via `--name` at boot, Codex
         // via post-boot `/rename`) as a project launch, without sending /start.
+        let agentEnvironment = Self.agentEnvironment(agents: nil, defaultAgents: defaultAgents)
         let output = try run(
             executablePath: scriptPath,
             arguments: ["--no-start", name],
-            environment: [
+            environment: agentEnvironment.overrides.merging([
                 "CMUX_PROJECT_LAUNCHER_CMUX": cmuxPath,
-            ]
+            ]) { _, launcherValue in launcherValue },
+            removingEnvironment: agentEnvironment.removing
         )
         return output.isEmpty ? "Launched ad-hoc workspace \(name)" : output
     }
@@ -262,11 +272,16 @@ public struct CmuxLauncher: Sendable {
     }
 
     @discardableResult
-    public func run(executablePath: String, arguments: [String], environment: [String: String]) throws -> String {
+    public func run(
+        executablePath: String,
+        arguments: [String],
+        environment: [String: String],
+        removingEnvironment: Set<String> = []
+    ) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
-        process.environment = Self.childEnvironment(overrides: environment)
+        process.environment = Self.childEnvironment(overrides: environment, removing: removingEnvironment)
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -346,8 +361,27 @@ public struct CmuxLauncher: Sendable {
         return min(value, 3600)
     }
 
-    private static func childEnvironment(overrides: [String: String]) -> [String: String] {
-        let inherited = ProcessInfo.processInfo.environment
+    /// The agent part of a launch environment. A project with its own choice sends
+    /// it as CMUX_PROJECT_LAUNCHER_AGENTS. A project without one sends no choice and
+    /// removes any inherited value, so a shell export cannot stand in for it. The
+    /// Settings default is always sent; the script uses it only for a new room.
+    static func agentEnvironment(
+        agents: AgentSelection?,
+        defaultAgents: AgentSelection
+    ) -> (overrides: [String: String], removing: Set<String>) {
+        var overrides = ["CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS": defaultAgents.csv]
+        guard let agents else {
+            return (overrides, ["CMUX_PROJECT_LAUNCHER_AGENTS"])
+        }
+        overrides["CMUX_PROJECT_LAUNCHER_AGENTS"] = agents.csv
+        return (overrides, [])
+    }
+
+    static func childEnvironment(
+        inherited: [String: String] = ProcessInfo.processInfo.environment,
+        overrides: [String: String],
+        removing: Set<String> = []
+    ) -> [String: String] {
         let allowedKeys = [
             "HOME",
             "LANG",
@@ -370,6 +404,9 @@ public struct CmuxLauncher: Sendable {
         }
         for (key, value) in inherited where key.hasPrefix("CMUX_PROJECT_LAUNCHER_") {
             result[key] = value
+        }
+        for key in removing {
+            result.removeValue(forKey: key)
         }
         for (key, value) in overrides {
             result[key] = value
