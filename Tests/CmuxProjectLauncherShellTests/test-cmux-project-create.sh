@@ -431,6 +431,10 @@ grep -Fq 'progress archive' "$stderr_log"
 : >"$create_log"
 : >"$close_log"
 rm -f "$fake_progress/progress__display.md"
+# Create mode resolves the AMQ root from inside the workspace root, so the pinned
+# root must exist; the golden layout below interpolates it.
+golden_workspace_root="$tmp_dir/workspace-root"
+mkdir -p "$golden_workspace_root"
 CMUX_FAKE_SEND_LOG="$send_log" \
 CMUX_FAKE_KEY_LOG="$key_log" \
 CMUX_FAKE_CREATE_LOG="$create_log" \
@@ -440,6 +444,7 @@ CMUX_FAKE_AMQ_ROOT="$tmp_dir/amq-root" \
 CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
 CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
 CMUX_PROJECT_LAUNCHER_PROGRESS_ROOT="$fake_progress" \
+CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT="$golden_workspace_root" \
 CMUX_PROJECT_LAUNCHER_POLL=1 \
   $create_bash "$repo_root/bin/cmux-project-create" --mode create --project display --brief-file "$brief_file" >"$stdout_log"
 
@@ -467,6 +472,18 @@ grep -Fq '"name":"Claude"' "$create_log"
 [[ "$(cut -f1 "$create_log")" == "display" ]]
 grep -Fq 'coopcodex display' "$create_log"
 grep -Fq 'coopcc display' "$create_log"
+# Golden capture: create mode's default Codex + Claude layout must stay byte-identical
+# while the launch pipeline is generalized from a fixed pair to a chosen set of agents.
+# A diff here is a behaviour change, not a fixture to update.
+expected_create_layout="$tmp_dir/expected-create-layout.json"
+cat >"$expected_create_layout" <<GOLDEN
+{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd $golden_workspace_root && zsh -ic 'coopcodex display'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd $golden_workspace_root && zsh -ic 'coopcc display -- --name claude-display'"}]}}]}
+GOLDEN
+if ! cut -f2- "$create_log" | cmp -s "$expected_create_layout" -; then
+  printf 'default create layout changed:\n' >&2
+  cut -f2- "$create_log" | diff "$expected_create_layout" - >&2 || true
+  exit 1
+fi
 grep -Fq 'using AMQ session display' "$stdout_log"
 if grep -Fq 'cml-display-create' "$create_log"; then
   printf 'create leaked the internal helper prefix into the persistent workspace\n' >&2

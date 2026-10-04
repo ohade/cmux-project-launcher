@@ -17,6 +17,7 @@ fake_amq_root="$tmp_dir/amq-root"
 send_log="$tmp_dir/send.log"
 key_log="$tmp_dir/key.log"
 create_log="$tmp_dir/create.log"
+layout_log="$tmp_dir/layout.log"
 select_log="$tmp_dir/select.log"
 open_log="$tmp_dir/open.log"
 close_log="$tmp_dir/close.log"
@@ -148,6 +149,9 @@ case "$cmd" in
         [[ "$layout" != *"coopcc $expected_session"* ]]
         [[ "$layout" != *"amq coop exec"* ]]
         [[ "$layout" != *"--require-wake"* ]]
+        if [[ -n "${CMUX_FAKE_LAYOUT_LOG:-}" ]]; then
+          printf '%s\n%s\n' "$description" "$layout" >>"$CMUX_FAKE_LAYOUT_LOG"
+        fi
         printf 'workspace-create\t%s\n' "$expected_session" >>"${CMUX_FAKE_EVENT_LOG:?}"
         printf '%s\n' "$expected_session" >>"${CMUX_FAKE_CREATE_LOG:?}"
         printf 'OK workspace:10\n'
@@ -910,6 +914,7 @@ export CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root"
 CMUX_FAKE_SEND_LOG="$send_log" \
 CMUX_FAKE_KEY_LOG="$key_log" \
 CMUX_FAKE_CREATE_LOG="$create_log" \
+CMUX_FAKE_LAYOUT_LOG="$layout_log" \
 CMUX_FAKE_SELECT_LOG="$select_log" \
 CMUX_FAKE_OPEN_LOG="$open_log" \
 CMUX_FAKE_CLOSE_LOG="$close_log" \
@@ -917,9 +922,24 @@ CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
 CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
 CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
 CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT=/Users/example/git \
 CMUX_PROJECT_LAUNCHER_POLL=1 \
 CMUX_PROJECT_LAUNCHER_WAIT=0 \
   $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log"
+
+# Golden capture: the default Codex + Claude launch must stay byte-identical while
+# the launch pipeline is generalized from a fixed pair to a chosen set of agents.
+# A diff here is a behaviour change, not a fixture to update.
+expected_layout_log="$tmp_dir/expected-layout.log"
+cat >"$expected_layout_log" <<'GOLDEN'
+Project launcher: demo-project (AMQ session: demo-project)
+{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex demo-project'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude demo-project -- --name claude-demo-project'"}]}}]}
+GOLDEN
+if ! cmp -s "$expected_layout_log" "$layout_log"; then
+  printf 'default launch description/layout changed:\n' >&2
+  diff "$expected_layout_log" "$layout_log" >&2 || true
+  exit 1
+fi
 
 # Codex is renamed post-boot with the naming dialog's confirmation Enter before
 # $start is sent.
