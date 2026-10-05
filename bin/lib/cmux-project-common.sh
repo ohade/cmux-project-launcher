@@ -52,23 +52,47 @@ validate_launcher_word() {
 # Two orders exist and both are contracts. The roster order is what `amq init
 # --agents` and the naming summaries use. The pipeline order is the pane order and
 # the order of every readiness, attach, rename and start step.
-known_agents_roster=(claude codex)
-known_agents_pipeline=(codex claude)
+known_agents_roster=(claude codex grok gemini cursorcodex)
+known_agents_pipeline=(codex claude grok gemini cursorcodex)
 
+# startup is "launcher" or "helper":
+#   launcher  the pane starts the agent with its wake off; the launcher waits for
+#             its banner, attaches the wake, names it and sends its start command.
+#   helper    the pane runs the coop helper exactly as typed (coopgrok <session>);
+#             the helper's bootstrap names the agent and attaches the wake on its
+#             own pane. The launcher only waits for that wake (Ohad, 2026-10-04).
+# Pane names are single tokens because surface_refs_for_name matches one token:
+# "Cursor Codex" would also match the Codex pane.
 agent_field() {
   case "$1:$2" in
     codex:surface_name) printf '%s' 'Codex' ;;
+    codex:startup) printf '%s' 'launcher' ;;
     # post-boot: renamed with /rename <agent>-<session> once the TUI is up.
     codex:rename_mode) printf '%s' 'post-boot' ;;
     codex:start_command) printf '%s' "\$start" ;;
     codex:process_regex) printf '%s' '(^|[[:space:]/])(codex|codex-pretty)([[:space:]]|$)' ;;
     codex:activity_regex) printf '%s' 'Working|Explored|Ran |Read |Using the ' ;;
     claude:surface_name) printf '%s' 'Claude' ;;
+    claude:startup) printf '%s' 'launcher' ;;
     # boot-flag: named by `-- --name <agent>-<session>` in the pane command.
     claude:rename_mode) printf '%s' 'boot-flag' ;;
     claude:start_command) printf '%s' '/start' ;;
     claude:process_regex) printf '%s' '(^|[[:space:]/])claude([[:space:]]|$)' ;;
     claude:activity_regex) printf '%s' 'Running [0-9]+ shell command|Brewed for|thought for|Read |Wrote|Updated' ;;
+    # Grok and Codex on Cursor both run the Cursor CLI, which execs node under
+    # the name it was started by: `agent` or `cursor-agent`.
+    grok:surface_name) printf '%s' 'Grok' ;;
+    grok:startup) printf '%s' 'helper' ;;
+    grok:rename_mode) printf '%s' 'helper' ;;
+    grok:process_regex) printf '%s' '(^|[[:space:]/])(agent|cursor-agent)([[:space:]]|$)' ;;
+    gemini:surface_name) printf '%s' 'Gemini' ;;
+    gemini:startup) printf '%s' 'helper' ;;
+    gemini:rename_mode) printf '%s' 'helper' ;;
+    gemini:process_regex) printf '%s' '(^|[[:space:]/])gemini([[:space:]]|$)' ;;
+    cursorcodex:surface_name) printf '%s' 'CursorCodex' ;;
+    cursorcodex:startup) printf '%s' 'helper' ;;
+    cursorcodex:rename_mode) printf '%s' 'helper' ;;
+    cursorcodex:process_regex) printf '%s' '(^|[[:space:]/])(agent|cursor-agent)([[:space:]]|$)' ;;
     *) return 1 ;;
   esac
 }
@@ -322,7 +346,7 @@ workspace_surface_rows() {
   fi
   while IFS= read -r row || [[ -n "$row" ]]; do
     [[ -n "$row" ]] && pane_refs+=("$row")
-  done < <(printf '%s\n' "$pane_output" | extract_cmux_refs pane | head -n 2)
+  done < <(printf '%s\n' "$pane_output" | extract_cmux_refs pane | head -n "${#known_agents_pipeline[@]}")
 
   if [[ "${#pane_refs[@]}" -gt 0 ]]; then
     for pane in "${pane_refs[@]}"; do

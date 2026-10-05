@@ -17,12 +17,21 @@ the deliverable: readiness and rename are best-effort and never discard the
 workspace on failure. A ready agent still gets its exact AMQ wake, and an agent
 left without one fails the launch (non-zero exit) while the workspace is kept.
 
-CMUX_PROJECT_LAUNCHER_AGENTS chooses the agents. With one agent the workspace has
-one pane, and only that agent is named, attached and started.
+CMUX_PROJECT_LAUNCHER_AGENTS chooses the agents, one pane each (up to five). Only
+Codex and Claude are named, attached and started as above. Grok, Gemini and Codex
+on Cursor start through coopgrok, coopgemini and coopcursorcodex exactly as typed;
+their own bootstrap names them and attaches their wake, and the launcher only
+waits until that wake is bound to their exact pane. They get no start prompt.
+
+Without CMUX_PROJECT_LAUNCHER_AGENTS an existing AMQ room keeps its agents, and a
+new room starts with CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS. A chosen agent the room
+lacks is added to the room before the workspace is created.
 
 Environment:
   CMUX_PROJECT_LAUNCHER_AGENTS   comma-separated agents to launch, any order:
-                                  claude, codex (default: claude,codex)
+                                  claude, codex, grok, gemini, cursorcodex
+  CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS
+                                  agents for a new room (default: claude,codex)
   CMUX_PROJECT_LAUNCHER_CMUX     cmux CLI path
   CMUX_PROJECT_LAUNCHER_WAIT     seconds to wait before post-boot sends (default: 8)
   CMUX_PROJECT_LAUNCHER_POLL     seconds to poll read-screen before fallback (default: 150)
@@ -51,6 +60,12 @@ Environment:
                                   Codex shell function or executable (default: amq_codex)
   CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER
                                   Claude shell function or executable (default: amq_claude)
+  CMUX_PROJECT_LAUNCHER_GROK_LAUNCHER
+                                  Grok coop helper (default: coopgrok)
+  CMUX_PROJECT_LAUNCHER_GEMINI_LAUNCHER
+                                  Gemini coop helper (default: coopgemini)
+  CMUX_PROJECT_LAUNCHER_CURSORCODEX_LAUNCHER
+                                  Codex on Cursor coop helper (default: coopcursorcodex)
   CMUX_PROJECT_LAUNCHER_OPEN      open CLI path for app activation
   CMUX_PROJECT_LAUNCHER_PS        ps CLI path for live agent-process checks
   CMUX_PROJECT_LAUNCHER_LOG       persistent diagnostics log path
@@ -108,6 +123,9 @@ ps_bin="${CMUX_PROJECT_LAUNCHER_PS:-/bin/ps}"
 workspace_root="${CMUX_PROJECT_LAUNCHER_WORKSPACE_ROOT:-$HOME/git}"
 codex_launcher="${CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER:-amq_codex}"
 claude_launcher="${CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER:-amq_claude}"
+grok_launcher="${CMUX_PROJECT_LAUNCHER_GROK_LAUNCHER:-coopgrok}"
+gemini_launcher="${CMUX_PROJECT_LAUNCHER_GEMINI_LAUNCHER:-coopgemini}"
+cursorcodex_launcher="${CMUX_PROJECT_LAUNCHER_CURSORCODEX_LAUNCHER:-coopcursorcodex}"
 wait_seconds="${CMUX_PROJECT_LAUNCHER_WAIT:-8}"
 # 45s is too short for a FRESH ad-hoc workspace. Measured 2026-09-08: at 45 the
 # launcher reports "surface did not become ready" and registers ZERO keepalive rows;
@@ -180,6 +198,9 @@ fi
 workspace_root="$(expand_path "$workspace_root")"
 validate_launcher_word "$codex_launcher" "CMUX_PROJECT_LAUNCHER_CODEX_LAUNCHER"
 validate_launcher_word "$claude_launcher" "CMUX_PROJECT_LAUNCHER_CLAUDE_LAUNCHER"
+validate_launcher_word "$grok_launcher" "CMUX_PROJECT_LAUNCHER_GROK_LAUNCHER"
+validate_launcher_word "$gemini_launcher" "CMUX_PROJECT_LAUNCHER_GEMINI_LAUNCHER"
+validate_launcher_word "$cursorcodex_launcher" "CMUX_PROJECT_LAUNCHER_CURSORCODEX_LAUNCHER"
 keepalive_bin="$(expand_path "$keepalive_bin")"
 
 release_project_launch_lock() {
@@ -752,15 +773,20 @@ if ! ensure_amq_session_initialized "$amq_session"; then
   exit 1
 fi
 
-# One (pane name, launcher word, boot name) triple per chosen agent, in pipeline
-# order. The boot name is empty unless the agent is named by a boot flag.
+# One (pane name, launcher word, boot name, startup) group per chosen agent, in
+# pipeline order. The boot name is empty unless the agent is named by a boot flag.
 layout_agent_args=()
 for agent in "${launch_agents[@]}"; do
   agent_boot_name=""
   if [[ "$(agent_field "$agent" rename_mode)" == "boot-flag" ]]; then
     agent_boot_name="$agent-$amq_session"
   fi
-  layout_agent_args+=("$(agent_field "$agent" surface_name)" "$(agent_var_get "$agent" launcher)" "$agent_boot_name")
+  layout_agent_args+=(
+    "$(agent_field "$agent" surface_name)"
+    "$(agent_var_get "$agent" launcher)"
+    "$agent_boot_name"
+    "$(agent_field "$agent" startup)"
+  )
 done
 
 layout=$(
@@ -792,10 +818,15 @@ def launch_inner(launcher, extra_args=""):
     return command
 
 panes = []
-for index in range(0, len(agent_args), 3):
-    surface_name, launcher, boot_name = agent_args[index:index + 3]
-    extra_args = "-- --name " + shlex.quote(boot_name) if boot_name else ""
-    inner = launch_inner(launcher, extra_args)
+for index in range(0, len(agent_args), 4):
+    surface_name, launcher, boot_name, startup = agent_args[index:index + 4]
+    if startup == "helper":
+        # A coop helper runs exactly as typed: in cmux its bootstrap defaults to
+        # --no-wake and attaches the wake to this pane itself once the agent is up.
+        inner = f"{shlex.quote(launcher)} {shlex.quote(amq_session)}"
+    else:
+        extra_args = "-- --name " + shlex.quote(boot_name) if boot_name else ""
+        inner = launch_inner(launcher, extra_args)
     surface = {
         "type": "terminal",
         "name": surface_name,
@@ -805,12 +836,28 @@ for index in range(0, len(agent_args), 3):
         surface["focus"] = True
     panes.append({"pane": {"surfaces": [surface]}})
 
-# cmux 0.64.25 accepts a bare pane as the layout root (probed 2026-10-04), so one
-# agent gets one pane and two agents get the side-by-side split.
-if len(panes) == 1:
-    layout = panes[0]
-elif len(panes) == 2:
-    layout = {"direction": "horizontal", "split": 0.5, "children": panes}
+def row(cells):
+    # Equal columns from nested two-way splits.
+    if len(cells) == 1:
+        return cells[0]
+    return {
+        "direction": "horizontal",
+        "split": round(1 / len(cells), 4),
+        "children": [cells[0], row(cells[1:])],
+    }
+
+# cmux 0.64.25 accepts a bare pane as the layout root and nested splits up to
+# five panes (both probed 2026-10-04). Up to three agents share one row; four
+# are two over two, and five are three over two.
+if len(panes) <= 3:
+    layout = row(panes)
+elif len(panes) <= 5:
+    top = (len(panes) + 1) // 2
+    layout = {
+        "direction": "vertical",
+        "split": 0.5,
+        "children": [row(panes[:top]), row(panes[top:])],
+    }
 else:
     sys.exit(f"no pane layout is defined for {len(panes)} agents")
 print(json.dumps(layout, separators=(",", ":")))
@@ -830,12 +877,17 @@ if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
       post-boot)
         printf 'post-boot %s rename: %q then %q + send-key enter\n' "$agent_name" "/rename" "$agent-$amq_session"
         ;;
+      helper)
+        printf '%s starts through %q, which attaches its own AMQ wake; no start command\n' \
+          "$agent_name" "$(agent_var_get "$agent" launcher)"
+        ;;
     esac
   done
   if [[ "$no_start" -eq 1 ]]; then
     printf 'no-start mode: workspace + rename only, no start commands sent\n'
   else
     for agent in "${launch_agents[@]}"; do
+      [[ "$(agent_field "$agent" startup)" == "launcher" ]] || continue
       printf 'post-boot %s send: %q + sleep %q + send-key enter, retry up to %q\n' \
         "$(agent_field "$agent" surface_name)" "$(agent_field "$agent" start_command) $project" "$enter_delay_seconds" "$enter_retries"
     done
@@ -907,6 +959,8 @@ agent_readiness_error() {
   local surface_lines=""
   local debug_blocks=""
   local screen_blocks=""
+  local refusal
+  local helper_note=""
   if [[ "${#launch_agents[@]}" -eq 1 ]]; then
     sessions_phrase="the agent session is"
   elif [[ "${#launch_agents[@]}" -gt 2 ]]; then
@@ -914,21 +968,31 @@ agent_readiness_error() {
   fi
   for agent in "${launch_agents[@]}"; do
     agent_name="$(agent_field "$agent" surface_name)"
-    start_commands="${start_commands:+$start_commands or }$(agent_field "$agent" start_command)"
-    surface_lines="$surface_lines$agent_name surface: $(agent_var_get "$agent" surface), expected screen regex: $(agent_var_get "$agent" ready_regex)"$'\n'
+    if [[ "$(agent_field "$agent" startup)" == "helper" ]]; then
+      surface_lines="$surface_lines$agent_name surface: $(agent_var_get "$agent" surface), expected: an AMQ wake for $agent on cmux:surface:$(agent_var_get "$agent" surface_id), attached by $(agent_var_get "$agent" launcher)"$'\n'
+      helper_note=$'\n'"A helper-started agent attaches its own wake after its banner appears;
+its coop bootstrap logs the attempt to ~/Library/Logs/CmuxProjectLauncher/launcher.log."
+    else
+      start_commands="${start_commands:+$start_commands or }$(agent_field "$agent" start_command)"
+      surface_lines="$surface_lines$agent_name surface: $(agent_var_get "$agent" surface), expected screen regex: $(agent_var_get "$agent" ready_regex)"$'\n'
+    fi
     debug_blocks="$debug_blocks"$'\n'"$agent_name debug:"$'\n'"$(surface_debug_block "$(agent_var_get "$agent" surface)")"$'\n'
     screen_blocks="$screen_blocks"$'\n'"$agent_name screen:"$'\n'"$(read_surface_text "$(agent_var_get "$agent" surface)" || true)"$'\n'
   done
+  refusal="Refusing to send $start_commands until $sessions_phrase confirmed."
+  if [[ -z "$start_commands" ]]; then
+    refusal="Refusing to report a launch until $sessions_phrase confirmed."
+  fi
   cat >&2 <<ERR
 cmux created $workspace_ref, but the $(launch_agent_names /) tabs did not pass readiness checks.
 $reason
-Refusing to send $start_commands until $sessions_phrase confirmed.
+$refusal
 
 AMQ session: $amq_session
 ${surface_lines}
 If a screen dump below shows only zsh, inspect the --no-wake boot command.
 A visible agent banner instead indicates a readiness-regex
-or startup-timing mismatch, not a failed wake registration.
+or startup-timing mismatch, not a failed wake registration.${helper_note}
 Close stale cmux workspaces or restart cmux, then try again.
 Set CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE=1 to keep the failed workspace.
 ${debug_blocks}${screen_blocks%$'\n'}
@@ -963,6 +1027,31 @@ wait_agent_ready() {
     return 0
   fi
   agent_not_ready_reason="$surface never showed a banner matching $ready_regex"
+  return 1
+}
+
+wait_helper_wake() {
+  # A helper-started agent is ready once its bootstrap's AMQ wake is a live
+  # `amq wake` for this room and agent that injects into this exact surface.
+  # The banner is the bootstrap's own condition, so it is not checked here.
+  local agent="$1"
+  local surface="$2"
+  local surface_id="$3"
+  local deadline
+  agent_not_ready_reason=""
+  if ! ensure_surface_runtime "$surface"; then
+    agent_not_ready_reason="cmux reported no live terminal tty for $surface"
+    return 1
+  fi
+  deadline=$((SECONDS + poll_seconds))
+  while true; do
+    if wake_targets_surface "$amq_session" "$agent" "$surface_id"; then
+      return 0
+    fi
+    (( SECONDS >= deadline )) && break
+    sleep 1
+  done
+  agent_not_ready_reason="no AMQ wake for $agent on cmux:surface:$surface_id appeared within ${poll_seconds}s"
   return 1
 }
 
@@ -1042,10 +1131,19 @@ if [[ "$no_start" -eq 1 ]]; then
   launch_ok=1
 fi
 
+# A helper agent's wake is its readiness, so a ready helper agent is attached.
 for agent in "${launch_agents[@]}"; do
   agent_var_set "$agent" ready 0
+  agent_var_set "$agent" attached 0
   agent_var_set "$agent" not_ready_reason ""
-  if wait_agent_ready "$(agent_var_get "$agent" surface)" "$(agent_var_get "$agent" ready_regex)"; then
+  if [[ "$(agent_field "$agent" startup)" == "helper" ]]; then
+    if wait_helper_wake "$agent" "$(agent_var_get "$agent" surface)" "$(agent_var_get "$agent" surface_id)"; then
+      agent_var_set "$agent" ready 1
+      agent_var_set "$agent" attached 1
+    else
+      agent_var_set "$agent" not_ready_reason "$agent_not_ready_reason"
+    fi
+  elif wait_agent_ready "$(agent_var_get "$agent" surface)" "$(agent_var_get "$agent" ready_regex)"; then
     agent_var_set "$agent" ready 1
   else
     agent_var_set "$agent" not_ready_reason "$agent_not_ready_reason"
@@ -1056,7 +1154,11 @@ if [[ "$no_start" -ne 1 ]]; then
   for agent in "${launch_agents[@]}"; do
     if [[ "$(agent_var_get "$agent" ready)" -ne 1 ]]; then
       agent_name="$(agent_field "$agent" surface_name)"
-      agent_readiness_error "$agent_name surface $(agent_var_get "$agent" surface) did not obtain a live runtime or show a recognized $agent_name banner."
+      if [[ "$(agent_field "$agent" startup)" == "helper" ]]; then
+        agent_readiness_error "$agent_name surface $(agent_var_get "$agent" surface) did not get its AMQ wake from $(agent_var_get "$agent" launcher): $(agent_var_get "$agent" not_ready_reason)."
+      else
+        agent_readiness_error "$agent_name surface $(agent_var_get "$agent" surface) did not obtain a live runtime or show a recognized $agent_name banner."
+      fi
       exit 1
     fi
   done
@@ -1067,9 +1169,10 @@ fi
 # Claude pane without a wake as well, so the room had zero wakes.
 # A refused attach for one agent must not skip the other either: try every
 # ready agent first, then fail naming each refusal (2026-09-23 /audit F3).
+# Helper agents were attached by their own bootstrap.
 attach_failed_agents=()
 for agent in "${launch_agents[@]}"; do
-  agent_var_set "$agent" attached 0
+  [[ "$(agent_field "$agent" startup)" == "launcher" ]] || continue
   if [[ "$(agent_var_get "$agent" ready)" -eq 1 ]]; then
     if attach_exact_wake "$agent" "$(agent_var_get "$agent" surface_id)"; then
       agent_var_set "$agent" attached 1
@@ -1081,7 +1184,9 @@ done
 if [[ "${#attach_failed_agents[@]}" -gt 0 ]]; then
   # An attached wake was already baselined. Surface its pre-existing queue
   # before exiting so a one-sided attach failure cannot suppress that backlog.
+  # A helper agent's bootstrap surfaces its own backlog.
   for agent in "${launch_agents[@]}"; do
+    [[ "$(agent_field "$agent" startup)" == "launcher" ]] || continue
     if [[ "$(agent_var_get "$agent" attached)" -eq 1 ]] && ! notify_existing_backlog "$agent" "$(agent_var_get "$agent" surface_id)"; then
       echo "$(agent_field "$agent" surface_name) wake attached, but its queued AMQ messages could not be surfaced after another attachment failed." >&2
     fi
@@ -1134,9 +1239,10 @@ done
 
 # Surface queued work only after the Codex naming handshake is finished. An
 # earlier doorbell can be consumed as rename input and leave both operations in
-# an ambiguous state.
+# an ambiguous state. A helper agent's bootstrap surfaces its own backlog.
 backlog_ok=1
 for agent in "${launch_agents[@]}"; do
+  [[ "$(agent_field "$agent" startup)" == "launcher" ]] || continue
   if [[ "$(agent_var_get "$agent" attached)" -eq 1 ]] && ! notify_existing_backlog "$agent" "$(agent_var_get "$agent" surface_id)"; then
     backlog_ok=0
     break
@@ -1192,6 +1298,10 @@ if [[ "$no_start" -eq 1 ]]; then
         [[ "$(agent_var_get "$agent" renamed)" -eq 1 ]] || naming_complete=0
         naming_summary="$naming_summary$agent_name rename confirmed; "
         ;;
+      helper)
+        [[ "$(agent_var_get "$agent" ready)" -eq 1 ]] || naming_complete=0
+        naming_summary="$naming_summary$agent_name started by $(agent_var_get "$agent" launcher); "
+        ;;
     esac
   done
   if [[ "$naming_complete" -eq 1 ]]; then
@@ -1203,6 +1313,7 @@ if [[ "$no_start" -eq 1 ]]; then
 fi
 
 for agent in "${launch_agents[@]}"; do
+  [[ "$(agent_field "$agent" startup)" == "launcher" ]] || continue
   start_command="$(agent_field "$agent" start_command)"
   if ! submit_prompt "$(agent_var_get "$agent" surface)" "$start_command $project" "$agent"; then
     launch_ok=1
