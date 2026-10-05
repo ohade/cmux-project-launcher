@@ -477,7 +477,7 @@ grep -Fq 'coopcc display' "$create_log"
 # A diff here is a behaviour change, not a fixture to update.
 expected_create_layout="$tmp_dir/expected-create-layout.json"
 cat >"$expected_create_layout" <<GOLDEN
-{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd $golden_workspace_root && zsh -ic 'coopcodex display'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd $golden_workspace_root && zsh -ic 'coopcc display -- --name claude-display'"}]}}]}
+{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd $golden_workspace_root && DISABLE_AUTO_UPDATE=true zsh -ic 'coopcodex display'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd $golden_workspace_root && DISABLE_AUTO_UPDATE=true zsh -ic 'coopcc display -- --name claude-display'"}]}}]}
 GOLDEN
 if ! cut -f2- "$create_log" | cmp -s "$expected_create_layout" -; then
   printf 'default create layout changed:\n' >&2

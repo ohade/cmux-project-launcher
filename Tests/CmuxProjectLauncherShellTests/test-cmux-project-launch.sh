@@ -459,8 +459,8 @@ JSON
       printf 'Last login: Fri Jun 5 on ttys027\n'
       printf '$ ~/git/demo-project\n'
     elif [[ "${CMUX_FAKE_MODE:-ready}" == "commandline" ]]; then
-      printf "cd /Users/example/git && zsh -ic 'coopcodex demo-project'\n"
-      printf "cd /Users/example/git && zsh -ic 'coopcc demo-project'\n"
+      printf "cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopcodex demo-project'\n"
+      printf "cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopcc demo-project'\n"
     else
       payload="$(awk -F '\t' -v surface="$surface" '$1 == surface { value = $2 } END { print value }' "${CMUX_FAKE_SEND_LOG:?}" 2>/dev/null || true)"
       # Model each send/Enter cycle independently: the most recent send stays visible
@@ -519,9 +519,27 @@ JSON
             printf 'Name thread\nType a name and press Enter\n> \n'
           fi
         elif [[ "$send_count" -eq 2 && "$key_count" -eq 1 ]]; then
-          printf 'Name thread\n> %s\n' "$rename_name"
+          if [[ "$rename_mode" == narrow-* ]]; then
+            # Codex 0.160.0 in one of three columns (Gate 4, 2026-10-05): the
+            # typed name wraps mid-word onto an indented row, and the footer
+            # reads "enter submit · esc back", not "Press enter to confirm".
+            printf '  Name thread\n› %s\n  %s\n  enter submit · esc back\n' \
+              "${rename_name%-*}-" "${rename_name##*-}"
+          else
+            printf 'Name thread\n> %s\n' "$rename_name"
+          fi
         elif [[ "$send_count" -eq 2 && "$key_count" -eq 2 ]]; then
-          if [[ "$rename_mode" == "vanished" ]]; then
+          if [[ "$rename_mode" == "narrow-index-success" ]]; then
+            index_file="${CODEX_HOME:?}/session_index.jsonl"
+            if ! grep -Fq "\"thread_name\":\"$rename_name\"" "$index_file" 2>/dev/null; then
+              printf '{"id":"fake-thread","thread_name":"%s","updated_at":"2026-10-05T09:21:00Z"}\n' \
+                "$rename_name" >>"$index_file"
+            fi
+            printf '› \n'
+          elif [[ "$rename_mode" == "narrow-stuck" ]]; then
+            printf '  Name thread\n› %s\n  %s\n  enter submit · esc back\n' \
+              "${rename_name%-*}-" "${rename_name##*-}"
+          elif [[ "$rename_mode" == "vanished" ]]; then
             printf '> \n'
           elif [[ "$rename_mode" == "index-success" ]]; then
             # Codex 0.155.1 (Gate 4, 2026-09-23): the dialog closes with no
@@ -550,6 +568,9 @@ JSON
         elif [[ "$send_count" -eq 2 ]]; then
           if [[ "$rename_mode" == "no-success" ]]; then
             printf 'Name thread\n> %s\nPress enter to confirm\n' "$rename_name"
+          elif [[ "$rename_mode" == "narrow-stuck" ]]; then
+            printf '  Name thread\n› %s\n  %s\n  enter submit · esc back\n' \
+              "${rename_name%-*}-" "${rename_name##*-}"
           elif [[ "$rename_mode" == "footer-displaced" ]]; then
             printf 'Name thread\n> %s\nPress enter to confirm\nwarning: cannot confirm codex CLI session "%s/codex" (sqlite3 query\n' \
               "$rename_name" "$rename_name"
@@ -1214,10 +1235,15 @@ CMUX_PROJECT_LAUNCHER_WAIT=0 \
 # Golden capture: the default Codex + Claude launch must stay byte-identical while
 # the launch pipeline is generalized from a fixed pair to a chosen set of agents.
 # A diff here is a behaviour change, not a fixture to update.
+# One deliberate change, 2026-10-05: every pane's inner zsh runs with
+# DISABLE_AUTO_UPDATE=true. When an oh-my-zsh update is due, an interactive zsh
+# with no typed input waiting stops at "Would you like to update? [Y/n]", and the
+# pane never starts its agent; live Gate 4 hung the Grok pane of a five-agent
+# launch there.
 expected_layout_log="$tmp_dir/expected-layout.log"
 cat >"$expected_layout_log" <<'GOLDEN'
 Project launcher: demo-project (AMQ session: demo-project)
-{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex demo-project'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude demo-project -- --name claude-demo-project'"}]}}]}
+{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex demo-project'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude demo-project -- --name claude-demo-project'"}]}}]}
 GOLDEN
 if ! cmp -s "$expected_layout_log" "$layout_log"; then
   printf 'default launch description/layout changed:\n' >&2
@@ -3210,7 +3236,7 @@ CMUX_PROJECT_LAUNCHER_AGENTS=claude \
 
 cat >"$expected_layout_log" <<'GOLDEN'
 Project launcher: solo-claude (AMQ session: solo-claude)
-{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude solo-claude -- --name claude-solo-claude'","focus":true}]}}
+{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude solo-claude -- --name claude-solo-claude'","focus":true}]}}
 GOLDEN
 if ! cmp -s "$expected_layout_log" "$layout_log"; then
   printf 'claude-only launch description/layout is wrong:\n' >&2
@@ -3254,7 +3280,7 @@ CMUX_PROJECT_LAUNCHER_AGENTS=codex \
 
 cat >"$expected_layout_log" <<'GOLDEN'
 Project launcher: solo-codex (AMQ session: solo-codex)
-{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex solo-codex'","focus":true}]}}
+{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex solo-codex'","focus":true}]}}
 GOLDEN
 if ! cmp -s "$expected_layout_log" "$layout_log"; then
   printf 'codex-only launch description/layout is wrong:\n' >&2
@@ -3299,7 +3325,7 @@ CMUX_PROJECT_LAUNCHER_AGENTS=codex,claude \
 
 cat >"$expected_layout_log" <<'GOLDEN'
 Project launcher: roster-order (AMQ session: roster-order)
-{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex roster-order'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude roster-order -- --name claude-roster-order'"}]}}]}
+{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex roster-order'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude roster-order -- --name claude-roster-order'"}]}}]}
 GOLDEN
 if ! cmp -s "$expected_layout_log" "$layout_log"; then
   printf 'codex,claude launch description/layout is wrong:\n' >&2
@@ -3479,7 +3505,7 @@ room_case duo-grok CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok CMUX_FAKE_AGENT_ROST
 [[ "$room_case_status" -eq 0 ]]
 check_layout 'claude,grok launch' <<'GOLDEN'
 Project launcher: duo-grok (AMQ session: duo-grok)
-{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude duo-grok -- --name claude-duo-grok'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && zsh -ic 'coopgrok duo-grok'"}]}}]}
+{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude duo-grok -- --name claude-duo-grok'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopgrok duo-grok'"}]}}]}
 GOLDEN
 grep -Fxq $'init\t'"$fake_amq_root/duo-grok"$'\tclaude,grok,user' "$event_log"
 grep -Fxq $'helper-wake\tgrok\tcmux:surface:33333333-3333-4333-8333-333333333333' "$event_log"
@@ -3495,7 +3521,7 @@ room_case trio CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex,grok CMUX_FAKE_AGENT_RO
 [[ "$room_case_status" -eq 0 ]]
 check_layout 'codex,claude,grok launch' <<'GOLDEN'
 Project launcher: trio (AMQ session: trio)
-{"direction":"horizontal","split":0.3333,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex trio'","focus":true}]}},{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude trio -- --name claude-trio'"}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && zsh -ic 'coopgrok trio'"}]}}]}]}
+{"direction":"horizontal","split":0.3333,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex trio'","focus":true}]}},{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude trio -- --name claude-trio'"}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopgrok trio'"}]}}]}]}
 GOLDEN
 [[ "$(event_count reattach)" -eq 2 ]]
 grep -Fq $'surface:26\tcodex-trio' "$send_log"
@@ -3510,7 +3536,7 @@ room_case quad CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok,gemini,cursorcodex CMUX_
 [[ "$room_case_status" -eq 0 ]]
 check_layout 'claude,grok,gemini,cursorcodex launch' <<'GOLDEN'
 Project launcher: quad (AMQ session: quad)
-{"direction":"vertical","split":0.5,"children":[{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude quad -- --name claude-quad'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && zsh -ic 'coopgrok quad'"}]}}]},{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Gemini","command":"cd /Users/example/git && zsh -ic 'coopgemini quad'"}]}},{"pane":{"surfaces":[{"type":"terminal","name":"CursorCodex","command":"cd /Users/example/git && zsh -ic 'coopcursorcodex quad'"}]}}]}]}
+{"direction":"vertical","split":0.5,"children":[{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude quad -- --name claude-quad'","focus":true}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopgrok quad'"}]}}]},{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Gemini","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopgemini quad'"}]}},{"pane":{"surfaces":[{"type":"terminal","name":"CursorCodex","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopcursorcodex quad'"}]}}]}]}
 GOLDEN
 [[ "$(event_count reattach)" -eq 1 ]]
 [[ "$(event_count helper-wake)" -eq 3 ]]
@@ -3523,7 +3549,7 @@ room_case all-five CMUX_PROJECT_LAUNCHER_AGENTS=cursorcodex,gemini,grok,codex,cl
 [[ "$room_case_status" -eq 0 ]]
 check_layout 'all-five launch' <<'GOLDEN'
 Project launcher: all-five (AMQ session: all-five)
-{"direction":"vertical","split":0.5,"children":[{"direction":"horizontal","split":0.3333,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex all-five'","focus":true}]}},{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude all-five -- --name claude-all-five'"}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && zsh -ic 'coopgrok all-five'"}]}}]}]},{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Gemini","command":"cd /Users/example/git && zsh -ic 'coopgemini all-five'"}]}},{"pane":{"surfaces":[{"type":"terminal","name":"CursorCodex","command":"cd /Users/example/git && zsh -ic 'coopcursorcodex all-five'"}]}}]}]}
+{"direction":"vertical","split":0.5,"children":[{"direction":"horizontal","split":0.3333,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Codex","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex all-five'","focus":true}]}},{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Claude","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_claude all-five -- --name claude-all-five'"}]}},{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopgrok all-five'"}]}}]}]},{"direction":"horizontal","split":0.5,"children":[{"pane":{"surfaces":[{"type":"terminal","name":"Gemini","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopgemini all-five'"}]}},{"pane":{"surfaces":[{"type":"terminal","name":"CursorCodex","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopcursorcodex all-five'"}]}}]}]}
 GOLDEN
 grep -Fxq $'init\t'"$fake_amq_root/all-five"$'\tclaude,codex,grok,gemini,cursorcodex,user' "$event_log"
 [[ "$(event_count reattach)" -eq 2 ]]
@@ -3539,7 +3565,7 @@ room_case solo-grok CMUX_PROJECT_LAUNCHER_AGENTS=grok CMUX_FAKE_AGENT_ROSTER=gro
 [[ "$room_case_status" -eq 0 ]]
 check_layout 'grok-only launch' <<'GOLDEN'
 Project launcher: solo-grok (AMQ session: solo-grok)
-{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && zsh -ic 'coopgrok solo-grok'","focus":true}]}}
+{"pane":{"surfaces":[{"type":"terminal","name":"Grok","command":"cd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic 'coopgrok solo-grok'","focus":true}]}}
 GOLDEN
 [[ "$(event_count reattach)" -eq 0 ]]
 [[ ! -s "$send_log" ]]
@@ -3637,7 +3663,7 @@ setup_fake_wakes live-grow claude
 room_case live-grow "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,grok
 [[ "$room_case_status" -eq 0 ]]
 grep -Fxq $'init\t'"$fake_amq_root/live-grow"$'\tclaude,user,grok\tforce' "$event_log"
-grep -Fxq $'new-pane\tgrok\tcd /Users/example/git && zsh -ic \'coopgrok live-grow\'' "$event_log"
+grep -Fxq $'new-pane\tgrok\tcd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic \'coopgrok live-grow\'' "$event_log"
 grep -Fxq $'rename-tab\tsurface:28\tGrok' "$event_log"
 grep -Fxq $'helper-wake\tgrok\tcmux:surface:33333333-3333-4333-8333-333333333333' "$event_log"
 init_line="$(awk -F '\t' '$1 == "init" { print NR; exit }' "$event_log")"
@@ -3657,7 +3683,7 @@ make_fake_room "$fake_amq_root/live-codex" claude user
 setup_fake_wakes live-codex claude
 room_case live-codex "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,codex
 [[ "$room_case_status" -eq 0 ]]
-grep -Fxq $'new-pane\tcodex\tcd /Users/example/git && zsh -ic \'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex live-codex\'' "$event_log"
+grep -Fxq $'new-pane\tcodex\tcd /Users/example/git && DISABLE_AUTO_UPDATE=true zsh -ic \'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex live-codex\'' "$event_log"
 grep -Fxq $'rename-tab\tsurface:26\tCodex' "$event_log"
 [[ "$(event_count reattach)" -eq 1 ]]
 grep -Fq $'reattach\tcodex\tcmux:surface:11111111-1111-4111-8111-111111111111' "$event_log"
@@ -3719,5 +3745,81 @@ grep -Fq 'cmux rename-tab --workspace workspace:7 --surface <new surface> Grok' 
 [[ "$(event_count new-pane)" -eq 0 ]]
 [[ "$(event_count workspace-create)" -eq 0 ]]
 grep -Fq '"agents":["claude","user"]' "$fake_amq_root/live-grow-dry/meta/config.json"
+
+# A narrow Codex pane wraps the typed name onto a second, indented row
+# ("codex-accept-launcher-20261005-" then "  091935"). Live Gate 4 of a
+# five-agent launch, 2026-10-05: the launcher looked for the name on one row,
+# reported it could not type it, and left the pane unnamed. A wrapped name is
+# still the typed name, so the rename goes ahead and the launch completes.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+: >"$CODEX_HOME/session_index.jsonl"
+CMUX_FAKE_RENAME_MODE=narrow-index-success \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+grep -Fq $'surface:26\tcodex-demo-project' "$send_log"
+grep -Fq $'surface:26\t$start demo-project' "$send_log"
+grep -Fq $'surface:27\t/start demo-project' "$send_log"
+grep -Fq 'Launched demo-project in workspace:10' "$stdout_log"
+[[ ! -s "$close_log" ]]
+
+# Codex 0.160.0 changed the naming dialog footer to "enter submit · esc back".
+# The launcher only knew "Press enter to confirm", so when a rename did not
+# confirm it saw no open dialog, sent no Escape, and left the pane stuck in
+# "Name thread", where it cannot take an AMQ doorbell (live Gate 4, 2026-10-05).
+# The dialog must be recognised, Enter retried, and the pane escaped.
+: >"$send_log"
+: >"$key_log"
+: >"$event_log"
+: >"$create_log"
+: >"$select_log"
+: >"$open_log"
+: >"$close_log"
+: >"$CODEX_HOME/session_index.jsonl"
+CMUX_FAKE_RENAME_MODE=narrow-stuck \
+  CMUX_FAKE_SEND_LOG="$send_log" \
+  CMUX_FAKE_KEY_LOG="$key_log" \
+  CMUX_FAKE_CREATE_LOG="$create_log" \
+  CMUX_FAKE_SELECT_LOG="$select_log" \
+  CMUX_FAKE_OPEN_LOG="$open_log" \
+  CMUX_FAKE_CLOSE_LOG="$close_log" \
+  CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+  CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+  CMUX_PROJECT_LAUNCHER_OPEN="$fake_open" \
+  CMUX_PROJECT_LAUNCHER_AMQ_ROOT="$fake_amq_root" \
+  CMUX_PROJECT_LAUNCHER_POLL=1 \
+  CMUX_PROJECT_LAUNCHER_SUBMIT_CONFIRM_WAIT=1 \
+  CMUX_PROJECT_LAUNCHER_WAIT=0 \
+    $launch_bash "$repo_root/bin/cmux-project-launch" --no-start demo-project >"$stdout_log" 2>"$tmp_dir/stderr.log"
+
+grep -Fq 'did not confirm the session name' "$tmp_dir/stderr.log"
+grep -Fq 'Dismissed the codex rename dialog after a failed rename.' "$tmp_dir/stderr.log"
+grep -Fq $'surface:26\tescape' "$key_log"
+# The open dialog was seen after the first Enter, so Enter was tried again.
+[[ "$(grep -Fxc $'surface:26\tenter' "$key_log")" -ge 3 ]]
+grep -Fq 'Launched ad-hoc workspace demo-project in workspace:10' "$stdout_log"
+if grep -Fq 'start demo-project' "$send_log"; then
+  printf 'narrow-stuck no-start unexpectedly sent a start prompt\n' >&2
+  exit 1
+fi
+[[ ! -s "$close_log" ]]
 
 printf 'ok - cmux project launch shell fixtures passed\n'

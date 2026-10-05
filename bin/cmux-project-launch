@@ -901,7 +901,10 @@ for index in range(0, len(agent_args), 4):
     else:
         extra_args = "-- --name " + shlex.quote(boot_name) if boot_name else ""
         inner = launch_inner(launcher, extra_args)
-    command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(inner)}"
+    # When an oh-my-zsh update is due, an interactive zsh with no typed input
+    # waiting asks "Would you like to update? [Y/n]" and the agent never starts.
+    # DISABLE_AUTO_UPDATE turns that check off for this inner shell only.
+    command = f"cd {shlex.quote(workspace_root)} && DISABLE_AUTO_UPDATE=true zsh -ic {shlex.quote(inner)}"
     commands.append(command)
     surface = {
         "type": "terminal",

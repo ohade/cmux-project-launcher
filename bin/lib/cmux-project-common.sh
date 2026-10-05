@@ -1036,6 +1036,25 @@ visible_input_region() {
   fi
 }
 
+# True when <text> shows <literal>, also when the terminal wrapped it. cmux
+# read-screen returns a soft wrap as a newline, and a narrow pane (one of three
+# columns) wraps a long name mid-word onto an indented row:
+# "› codex-accept-launcher-20261005-" then "  091935" (Gate 4, 2026-10-05).
+# So compare again with spaces, tabs and line breaks removed from both sides.
+text_shows_literal() {
+  local text="$1"
+  local literal="$2"
+  local squeezed_text
+  local squeezed_literal
+  if grep -Fq -- "$literal" <<<"$text"; then
+    return 0
+  fi
+  squeezed_literal="$(printf '%s' "$literal" | LC_ALL=C tr -d ' \t\r\n')"
+  [[ -n "$squeezed_literal" ]] || return 1
+  squeezed_text="$(printf '%s' "$text" | LC_ALL=C tr -d ' \t\r\n')"
+  grep -Fq -- "$squeezed_literal" <<<"$squeezed_text"
+}
+
 prompt_visible_in_input() {
   local surface="$1"
   local prompt="$2"
@@ -1043,7 +1062,7 @@ prompt_visible_in_input() {
   if ! text="$(visible_input_region "$surface")"; then
     return 2
   fi
-  if grep -Fq -- "$prompt" <<<"$text"; then
+  if text_shows_literal "$text" "$prompt"; then
     return 0
   fi
   return 1
@@ -1155,7 +1174,8 @@ submit_prompt_when_input_ready() {
 # Claude is named at boot with `claude --name <name>` (see the layout builders), so
 # this post-boot path is used for Codex, whose CLI has no session-name launch flag.
 # Codex's `/rename` opens a "Type a name and press Enter" dialog whose footer
-# already says "Press enter to confirm". The Enter that submits the name also
+# already says "Press enter to confirm" (since Codex 0.160.0, "enter submit · esc
+# back"). The Enter that submits the name also
 # confirms the rename. Require a new matching success marker after that Enter;
 # retry only while the same naming dialog, exact name, and active confirmation
 # footer remain at the bottom of the visible input region. Codex replaces the
@@ -1280,7 +1300,7 @@ rename_dialog_returned_to_composer() {
   local last="$1"
   local name="$2"
   case "$last" in
-    *"Press enter to confirm"*) return 1 ;;
+    *"Press enter to confirm"*|*"enter submit"*) return 1 ;;
   esac
   if [[ -n "$name" && "$last" == *"$name"* ]]; then
     return 1
@@ -1298,9 +1318,11 @@ rename_dialog_is_active() {
   local last_nonblank
   input_region="$(printf '%s\n' "$text" | tail -n "$input_probe_lines")"
   last_nonblank="$(awk 'NF { line = $0 } END { print line }' <<<"$input_region")"
+  # Codex 0.160.0 replaced the "Press enter to confirm" footer with
+  # "enter submit · esc back" (Gate 4, 2026-10-05); accept either.
   grep -Eq -- '(^|[[:space:]])(Name|Rename) thread([[:space:]]|$)' <<<"$input_region" \
-    && grep -Fq -- "$name" <<<"$input_region" \
-    && grep -Fq -- "Press enter to confirm" <<<"$input_region" \
+    && text_shows_literal "$input_region" "$name" \
+    && grep -Eq -- 'Press enter to confirm|(^|[[:space:]])enter submit([[:space:]]|$)' <<<"$input_region" \
     && ! rename_dialog_returned_to_composer "$last_nonblank" "$name"
 }
 
