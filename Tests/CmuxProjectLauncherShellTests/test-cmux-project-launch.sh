@@ -28,6 +28,7 @@ diagnostics_log="$tmp_dir/launcher.log"
 descriptor_pid_log="$tmp_dir/descriptor-daemon.pids"
 fake_helper_wake="$tmp_dir/fake-helper-wake"
 helper_wakes="$tmp_dir/helper-wakes.tsv"
+added_panes="$tmp_dir/added-panes"
 background_pids=()
 mkdir -p "$fake_amq_root"
 export CMUX_PROJECT_LAUNCHER_LOG="$diagnostics_log"
@@ -35,6 +36,7 @@ export CMUX_FAKE_EVENT_LOG="$event_log"
 export CMUX_FAKE_AMQ_ROOT="$fake_amq_root"
 export CMUX_FAKE_HELPER_WAKE_SCRIPT="$fake_helper_wake"
 export CMUX_FAKE_HELPER_WAKES="$helper_wakes"
+export CMUX_FAKE_ADDED_PANES="$added_panes"
 # The launcher reads Codex's session index as rename proof. Keep it hermetic:
 # the real ~/.codex index can already hold a codex-demo-project row.
 export CODEX_HOME="$tmp_dir/codex-home"
@@ -145,6 +147,41 @@ fake_slot() {
 }
 helper_agents=(grok gemini cursorcodex)
 
+# The workspace's agents now: CMUX_FAKE_AGENT_ROSTER plus any pane new-pane added.
+fake_roster_now() {
+  local roster="${CMUX_FAKE_AGENT_ROSTER:-codex,claude}"
+  local added
+  if [[ -n "${CMUX_FAKE_ADDED_PANES:-}" && -s "$CMUX_FAKE_ADDED_PANES" ]]; then
+    while IFS= read -r added; do
+      [[ -n "$added" ]] && roster="$roster,$added"
+    done <"$CMUX_FAKE_ADDED_PANES"
+  fi
+  printf '%s' "$roster"
+}
+
+# Play a helper agent's bootstrap: register its wake on its exact pane.
+# CMUX_FAKE_HELPER_WAKE_SKIP lists helpers that never attach, _TARGET=wrong
+# attaches them to another surface, and _DELAY attaches them late.
+fake_attach_helper() {
+  local agent="$1"
+  local session="$2"
+  local helper_surface_id
+  [[ " ${helper_agents[*]} " == *" $agent "* ]] || return 0
+  [[ ",${CMUX_FAKE_HELPER_WAKE_SKIP:-}," == *",$agent,"* ]] && return 0
+  read -r _ _ helper_surface_id _ _ <<<"$(fake_slot "$agent")"
+  if [[ "${CMUX_FAKE_HELPER_WAKE_TARGET:-exact}" == "wrong" ]]; then
+    helper_surface_id=99999999-9999-4999-8999-999999999999
+  fi
+  if [[ -n "${CMUX_FAKE_HELPER_WAKE_DELAY:-}" ]]; then
+    (
+      sleep "$CMUX_FAKE_HELPER_WAKE_DELAY"
+      "${CMUX_FAKE_HELPER_WAKE_SCRIPT:?}" "$session" "$agent" "$helper_surface_id"
+    ) </dev/null >/dev/null 2>&1 &
+  else
+    "${CMUX_FAKE_HELPER_WAKE_SCRIPT:?}" "$session" "$agent" "$helper_surface_id"
+  fi
+}
+
 case "$cmd" in
   workspace)
     subcmd="${1:?missing workspace subcommand}"
@@ -218,24 +255,8 @@ case "$cmd" in
         fi
         printf 'workspace-create\t%s\n' "$expected_session" >>"${CMUX_FAKE_EVENT_LOG:?}"
         printf '%s\n' "$expected_session" >>"${CMUX_FAKE_CREATE_LOG:?}"
-        # Play each helper agent's bootstrap: register its wake on its exact pane.
-        # CMUX_FAKE_HELPER_WAKE_SKIP lists helpers that never attach, _TARGET=wrong
-        # attaches them to another surface, and _DELAY attaches them late.
         for agent in "${helper_agents[@]}"; do
-          [[ "$fake_roster" == *",$agent,"* ]] || continue
-          [[ ",${CMUX_FAKE_HELPER_WAKE_SKIP:-}," == *",$agent,"* ]] && continue
-          read -r _ _ helper_surface_id _ _ <<<"$(fake_slot "$agent")"
-          if [[ "${CMUX_FAKE_HELPER_WAKE_TARGET:-exact}" == "wrong" ]]; then
-            helper_surface_id=99999999-9999-4999-8999-999999999999
-          fi
-          if [[ -n "${CMUX_FAKE_HELPER_WAKE_DELAY:-}" ]]; then
-            (
-              sleep "$CMUX_FAKE_HELPER_WAKE_DELAY"
-              "${CMUX_FAKE_HELPER_WAKE_SCRIPT:?}" "$expected_session" "$agent" "$helper_surface_id"
-            ) </dev/null >/dev/null 2>&1 &
-          else
-            "${CMUX_FAKE_HELPER_WAKE_SCRIPT:?}" "$expected_session" "$agent" "$helper_surface_id"
-          fi
+          [[ "$fake_roster" == *",$agent,"* ]] && fake_attach_helper "$agent" "$expected_session"
         done
         printf 'OK workspace:10\n'
         ;;
@@ -332,7 +353,8 @@ JSON
     printf '1: window:2\n'
     ;;
   list-panes)
-    case "${CMUX_FAKE_AGENT_ROSTER:-codex,claude}" in
+    roster_now="$(fake_roster_now)"
+    case "$roster_now" in
       codex)
         printf '* pane:11 [1 surface] [focused]\n'
         ;;
@@ -340,7 +362,7 @@ JSON
         printf '* pane:12 [1 surface] [focused]\n'
         ;;
       *grok*|*gemini*|*cursorcodex*)
-        for agent in ${CMUX_FAKE_AGENT_ROSTER//,/ }; do
+        for agent in ${roster_now//,/ }; do
           read -r slot_pane _ <<<"$(fake_slot "$agent")"
           printf '%s [1 surface]\n' "$slot_pane"
         done
@@ -388,6 +410,11 @@ JSON
         for agent in "${helper_agents[@]}"; do
           read -r slot_pane slot_surface slot_id _ slot_name <<<"$(fake_slot "$agent")"
           [[ "$slot_pane" == "$pane" ]] || continue
+          # A pane new-pane added is a plain "Terminal" until rename-tab names it.
+          if [[ ",${CMUX_FAKE_AGENT_ROSTER:-codex,claude}," != *",$agent,"* ]] \
+            && ! grep -Fxq $'rename-tab\t'"$slot_surface"$'\t'"$slot_name" "${CMUX_FAKE_EVENT_LOG:?}" 2>/dev/null; then
+            slot_name=Terminal
+          fi
           if [[ "$id_format" == "both" ]]; then
             printf '%s %s %s\n' "$slot_surface" "$slot_id" "$slot_name"
           else
@@ -580,7 +607,7 @@ JSON
       printf '[1] surface:27 "Claude" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:12\n' "$runtime_workspace"
       printf '    runtime=1 focused=0 selected=1 terminal=0x3 ghostty=0x4\n'
     else
-      fake_roster=",${CMUX_FAKE_AGENT_ROSTER:-codex,claude},"
+      fake_roster=",$(fake_roster_now),"
       if [[ "$fake_roster" == *",codex,"* ]]; then
         printf '[0] surface:26 "Codex" mapped=1 tree=1 window=window:1 workspace=%s pane=pane:11\n' "$runtime_workspace"
         printf '    runtime=1 focused=1 selected=1 terminal=0x1 ghostty=0x2\n'
@@ -602,6 +629,82 @@ JSON
         block_index=$((block_index + 1))
       done
     fi
+    ;;
+  new-pane)
+    # Real cmux 0.64.25 prints "OK surface:N pane:M workspace:W" (probed 2026-10-05).
+    target_workspace=""
+    pane_command=""
+    pane_focus=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --workspace)
+          target_workspace="${2:?missing workspace}"
+          shift 2
+          ;;
+        --command)
+          pane_command="${2:?missing command}"
+          shift 2
+          ;;
+        --focus)
+          pane_focus="${2:?missing focus}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    [[ "$target_workspace" == "${CMUX_FAKE_RUNTIME_WORKSPACE:-workspace:10}" ]]
+    [[ "$pane_focus" == "false" ]]
+    case "$pane_command" in
+      *"amq_codex "*) agent=codex ;;
+      *"amq_claude "*) agent=claude ;;
+      *"zsh -ic 'coopgrok "*) agent=grok ;;
+      *"zsh -ic 'coopgemini "*) agent=gemini ;;
+      *"zsh -ic 'coopcursorcodex "*) agent=cursorcodex ;;
+      *)
+        printf 'unexpected new-pane command: %s\n' "$pane_command" >&2
+        exit 64
+        ;;
+    esac
+    printf '%s\n' "$agent" >>"${CMUX_FAKE_ADDED_PANES:?}"
+    printf 'new-pane\t%s\t%s\n' "$agent" "$pane_command" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    read -r slot_pane slot_surface _ _ _ <<<"$(fake_slot "$agent")"
+    fake_attach_helper "$agent" "${CMUX_FAKE_EXPECT_SESSION:-demo-project}"
+    printf 'OK %s %s %s\n' "$slot_surface" "$slot_pane" "$target_workspace"
+    ;;
+  rename-tab)
+    surface=""
+    title="${!#}"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --surface)
+          surface="${2:?missing surface}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf 'rename-tab\t%s\t%s\n' "$surface" "$title" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    printf 'OK action=rename tab=tab:%s\n' "${surface#surface:}"
+    ;;
+  close-surface)
+    surface=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --surface)
+          surface="${2:?missing surface}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf 'close-surface\t%s\n' "$surface" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    printf 'OK\n'
     ;;
   focus-pane|refresh-surfaces)
     printf 'OK\n'
@@ -932,21 +1035,30 @@ SH
 chmod +x "$fake_ps"
 export CMUX_PROJECT_LAUNCHER_PS="$fake_ps"
 
+# setup_fake_wakes <session> [agent...]: launcher-attached wakes for Codex and/or
+# Claude (default: both), bound to their fixed surfaces. Pass only the agents the
+# room has: a wake creates the agent's folder, and real `amq doctor` flags a
+# mailbox folder for an agent the room's config does not list.
 setup_fake_wakes() {
   local session="$1"
   local session_root="$fake_amq_root/$session"
-  mkdir -p "$session_root/agents/codex" "$session_root/agents/claude"
-  sleep 120 &
-  codex_wake_pid=$!
-  sleep 120 &
-  claude_wake_pid=$!
-  background_pids+=("$codex_wake_pid" "$claude_wake_pid")
-  printf '{"pid":%s,"root":"%s","agent":"codex"}\n' "$codex_wake_pid" "$session_root" \
-    >"$session_root/agents/codex/.wake.lock"
-  printf '{"pid":%s,"root":"%s","agent":"claude"}\n' "$claude_wake_pid" "$session_root" \
-    >"$session_root/agents/claude/.wake.lock"
-  export CMUX_FAKE_CODEX_WAKE_PID="$codex_wake_pid"
-  export CMUX_FAKE_CLAUDE_WAKE_PID="$claude_wake_pid"
+  local agent
+  local wake_pid
+  shift
+  [[ "$#" -gt 0 ]] || set -- codex claude
+  unset CMUX_FAKE_CODEX_WAKE_PID CMUX_FAKE_CLAUDE_WAKE_PID
+  for agent in "$@"; do
+    mkdir -p "$session_root/agents/$agent"
+    sleep 120 &
+    wake_pid=$!
+    background_pids+=("$wake_pid")
+    printf '{"pid":%s,"root":"%s","agent":"%s"}\n' "$wake_pid" "$session_root" "$agent" \
+      >"$session_root/agents/$agent/.wake.lock"
+    case "$agent" in
+      codex) export CMUX_FAKE_CODEX_WAKE_PID="$wake_pid" ;;
+      claude) export CMUX_FAKE_CLAUDE_WAKE_PID="$wake_pid" ;;
+    esac
+  done
   export CMUX_FAKE_WAKE_SESSION="$session"
   unset CMUX_FAKE_WAKE_COMMAND_ROOT
 }
@@ -3259,6 +3371,7 @@ room_case() {
   : >"$create_log"
   : >"$layout_log"
   : >"$close_log"
+  : >"$added_panes"
   room_case_status=0
   # An empty $launch_bash must vanish, so the script runs under its own shebang.
   # shellcheck disable=SC2086
@@ -3508,5 +3621,103 @@ room_case live-five CMUX_FAKE_AGENT_ROSTER=codex,claude,grok,gemini,cursorcodex 
 grep -Fq 'its Gemini surface has no live Gemini process' "$tmp_dir/stderr.log"
 [[ ! -s "$create_log" ]]
 [[ ! -s "$send_log" ]]
+
+# Live growth: a ticked agent whose pane a live workspace lacks gets a new pane
+# there (Ohad, 2026-10-04). The room grows first, the pane is named for the
+# next launch's checks, and the agents already running are left alone.
+live_room_args=(
+  CMUX_FAKE_AMQ_WHO_MODE=expected-active
+  CMUX_FAKE_WORKSPACE_LIST_MODE=expected-project
+  CMUX_FAKE_RUNTIME_WORKSPACE=workspace:7
+)
+
+# Grok joins a live Claude workspace whose room lacks it.
+make_fake_room "$fake_amq_root/live-grow" claude user
+setup_fake_wakes live-grow claude
+room_case live-grow "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,grok
+[[ "$room_case_status" -eq 0 ]]
+grep -Fxq $'init\t'"$fake_amq_root/live-grow"$'\tclaude,user,grok\tforce' "$event_log"
+grep -Fxq $'new-pane\tgrok\tcd /Users/example/git && zsh -ic \'coopgrok live-grow\'' "$event_log"
+grep -Fxq $'rename-tab\tsurface:28\tGrok' "$event_log"
+grep -Fxq $'helper-wake\tgrok\tcmux:surface:33333333-3333-4333-8333-333333333333' "$event_log"
+init_line="$(awk -F '\t' '$1 == "init" { print NR; exit }' "$event_log")"
+new_pane_line="$(awk -F '\t' '$1 == "new-pane" { print NR; exit }' "$event_log")"
+[[ "$init_line" -lt "$new_pane_line" ]]
+[[ "$(event_count new-pane)" -eq 1 ]]
+[[ "$(event_count reattach)" -eq 0 ]]
+[[ "$(event_count workspace-create)" -eq 0 ]]
+[[ ! -s "$send_log" ]]
+[[ ! -s "$key_log" ]]
+[[ ! -s "$close_log" ]]
+grep -Fq 'Added Grok to live-grow in workspace:7 using AMQ session live-grow' "$stdout_log"
+
+# Codex joins a live Claude workspace: the launcher attaches, names and starts
+# the new Codex pane only.
+make_fake_room "$fake_amq_root/live-codex" claude user
+setup_fake_wakes live-codex claude
+room_case live-codex "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,codex
+[[ "$room_case_status" -eq 0 ]]
+grep -Fxq $'new-pane\tcodex\tcd /Users/example/git && zsh -ic \'AMQ_COOP_WAKE_FLAG=--no-wake AMQ_KEEPALIVE_DISABLED=1 amq_codex live-codex\'' "$event_log"
+grep -Fxq $'rename-tab\tsurface:26\tCodex' "$event_log"
+[[ "$(event_count reattach)" -eq 1 ]]
+grep -Fq $'reattach\tcodex\tcmux:surface:11111111-1111-4111-8111-111111111111' "$event_log"
+grep -Fq $'surface:26\tcodex-live-codex' "$send_log"
+# shellcheck disable=SC2016
+grep -Fq $'surface:26\t$start live-codex' "$send_log"
+if grep -Fq 'surface:27' "$send_log" "$key_log"; then
+  printf 'live growth drove the Claude pane that was already running\n' >&2
+  exit 1
+fi
+[[ "$(event_count workspace-create)" -eq 0 ]]
+grep -Fq 'Added Codex to live-codex in workspace:7 using AMQ session live-codex' "$stdout_log"
+
+# An added pane whose helper wake never arrives is closed again; the live
+# workspace stays, and only the added agent's identity is retired.
+make_fake_room "$fake_amq_root/live-grow-fails" claude user
+setup_fake_wakes live-grow-fails claude
+room_case live-grow-fails "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,grok CMUX_FAKE_HELPER_WAKE_SKIP=grok
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'no AMQ wake for grok on cmux:surface:33333333-3333-4333-8333-333333333333' "$tmp_dir/stderr.log"
+grep -Fxq $'close-surface\tsurface:28' "$event_log"
+grep -Fxq $'retire\tgrok' "$event_log"
+[[ ! -s "$close_log" ]]
+[[ ! -s "$send_log" ]]
+
+# A missing pane whose agent still has a live AMQ wake is not re-added: that
+# wake would be a second one for the same agent.
+make_fake_room "$fake_amq_root/live-stale-wake" claude grok user
+setup_fake_wakes live-stale-wake claude
+"$fake_amq" wake </dev/null >/dev/null 2>&1 &
+stale_wake_pid=$!
+background_pids+=("$stale_wake_pid")
+printf '{"pid":%s,"root":"%s","agent":"grok"}\n' "$stale_wake_pid" "$fake_amq_root/live-stale-wake" \
+  >"$fake_amq_root/live-stale-wake/agents/grok/.wake.lock"
+room_case live-stale-wake "${live_room_args[@]}" CMUX_FAKE_AGENT_ROSTER=claude
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'Grok' "$tmp_dir/stderr.log"
+grep -Fq 'live AMQ wake' "$tmp_dir/stderr.log"
+[[ "$(event_count new-pane)" -eq 0 ]]
+[[ "$(event_count init)" -eq 0 ]]
+[[ ! -s "$send_log" ]]
+kill "$stale_wake_pid" 2>/dev/null || true
+
+# A dry run of live growth prints the room growth and the new pane, and changes
+# nothing. The room is not grown in a dry run, so its health is not judged
+# against the agents it would gain.
+make_fake_room "$fake_amq_root/live-grow-dry" claude user
+setup_fake_wakes live-grow-dry claude
+room_case live-grow-dry "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok CMUX_FAKE_AGENT_ROSTER=claude CMUX_PROJECT_LAUNCHER_DRY_RUN=1
+if [[ "$room_case_status" -ne 0 ]]; then
+  printf 'live growth dry run exited %s, expected 0\n' "$room_case_status" >&2
+  exit 1
+fi
+grep -Fq 'would add grok to AMQ session' "$stdout_log"
+grep -Fq 'cmux new-pane --workspace workspace:7 --direction right --command' "$stdout_log"
+grep -Fq 'coopgrok' "$stdout_log"
+grep -Fq 'cmux rename-tab --workspace workspace:7 --surface <new surface> Grok' "$stdout_log"
+[[ "$(event_count init)" -eq 0 ]]
+[[ "$(event_count new-pane)" -eq 0 ]]
+[[ "$(event_count workspace-create)" -eq 0 ]]
+grep -Fq '"agents":["claude","user"]' "$fake_amq_root/live-grow-dry/meta/config.json"
 
 printf 'ok - cmux project launch shell fixtures passed\n'

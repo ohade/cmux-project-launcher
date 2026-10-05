@@ -544,16 +544,29 @@ PY
 wake_lock_active() {
   local session="$1"
   local agent
+  for agent in "${known_agents_pipeline[@]}"; do
+    if agent_wake_lock_live "$session" "$agent"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# agent_wake_lock_live <session> <agent>: 0 when the agent's .wake.lock names a
+# live `amq wake` process, and also when the lock cannot be read (the safe
+# answer); 1 when there is no lock or its process is gone.
+agent_wake_lock_live() {
+  local session="$1"
+  local agent="$2"
   local lock
   local pid
   local pid_status
   local command_line
   [[ -z "${amq_base_root:-}" ]] && return 1
-  for agent in "${known_agents_pipeline[@]}"; do
-    lock="$amq_base_root/$session/agents/$agent/.wake.lock"
-    [[ -f "$lock" ]] || continue
-    pid_status=0
-    pid="$(/usr/bin/python3 - "$lock" <<'PY'
+  lock="$amq_base_root/$session/agents/$agent/.wake.lock"
+  [[ -f "$lock" ]] || return 1
+  pid_status=0
+  pid="$(/usr/bin/python3 - "$lock" <<'PY'
 import json
 import sys
 
@@ -569,20 +582,19 @@ if isinstance(pid, int) and pid > 0:
 sys.exit(2)
 PY
 )" || pid_status=$?
-    case "$pid_status" in
-      0)
-        if kill -0 "$pid" 2>/dev/null; then
-          command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-          if grep -Eq '(^|[ /])amq([^[:alnum:]_.-]|.*[[:space:]])wake([[:space:]]|$)' <<<"$command_line"; then
-            return 0
-          fi
+  case "$pid_status" in
+    0)
+      if kill -0 "$pid" 2>/dev/null; then
+        command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+        if grep -Eq '(^|[ /])amq([^[:alnum:]_.-]|.*[[:space:]])wake([[:space:]]|$)' <<<"$command_line"; then
+          return 0
         fi
-        ;;
-      2)
-        return 0
-        ;;
-    esac
-  done
+      fi
+      ;;
+    2)
+      return 0
+      ;;
+  esac
   return 1
 }
 

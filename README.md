@@ -20,9 +20,11 @@ Create-project flow:
 
 - Lists active and archived projects from progress files.
 - Shows resume/history context from the project metadata and task-state file.
-- Launches a project workspace with Codex and Claude panes.
-- Initializes a new AMQ room and all three mailboxes before cmux starts either
-  agent. Existing configured rooms are left untouched only after AMQ's read-only
+- Launches a project workspace with the agents chosen for it, one pane each:
+  any of Claude Code, Codex, Grok, Gemini and Codex on Cursor. See
+  [Agents](#agents).
+- Initializes a new AMQ room and every chosen agent's mailbox before cmux starts
+  any agent. Existing configured rooms are left untouched only after AMQ's read-only
   doctor validates the config and mailboxes; unhealthy rooms fail before cmux
   creates a workspace.
 - Serializes launches of the same project, so concurrent invocations cannot
@@ -49,6 +51,30 @@ Create-project flow:
   `commit-progress.sh`.
 - Offers temporary ad-hoc cmux workspaces that are not saved as projects.
 
+## Agents
+
+The **Agents** menu chooses the agents for the selected project, and
+**Settings** sets the default. All chosen agents join one AMQ room.
+
+- A project with no choice of its own keeps its existing room's agents. A new
+  room starts with the Settings default: Claude Code + Grok unless changed.
+- A chosen agent the room lacks is added to the room before any pane starts.
+  When the project's workspace is already live, the launcher adds a pane for
+  that agent there and leaves the running agents alone.
+- Codex and Claude start through `amq_codex` and `amq_claude`. The launcher
+  attaches their wakes, names them and sends their start prompts.
+- Grok, Gemini and Codex on Cursor start through `coopgrok`, `coopgemini` and
+  `coopcursorcodex` exactly as typed. Their own bootstrap names them and
+  attaches their wake. The launcher only waits until that wake is bound to
+  their exact pane, and sends them no prompt.
+- Up to three agents share one row of panes. Four agents are two over two, and
+  five are three over two.
+- A room whose config holds keys other than `version`, `created_utc` and
+  `agents` is not grown, because `amq init --force` would drop those keys.
+
+From the command line, `CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok` chooses the
+agents and `CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS` sets them for a new room.
+
 ## Requirements
 
 - macOS with Swift 6.
@@ -70,8 +96,13 @@ Create-project flow:
   - Any Claude SessionStart hook that emits `sessionTitle` must preserve an
     explicit `--name` from the cmux launch metadata; otherwise it will replace
     the launcher's `claude-<session>` name immediately after boot.
+  - `coopgrok <session>`, `coopgemini <session>` and `coopcursorcodex <session>`
+    for the helper-started agents. Inside cmux each must attach its own wake to
+    the pane's `CMUX_SURFACE_ID` once the agent is up.
 - The create-project helper intentionally keeps its privileged
   `coopcodex <session>` and `coopcc <session> -- <agent-arguments>` defaults.
+  It always starts Codex and Claude and ignores the Agents choice, because it
+  hands the reviewed creation brief to Claude.
 - Optional: Claude CLI for the "Ask Claude" draft helper.
 - Optional: `/start` progress tooling, including `start-precompute` and
   `commit-progress.sh`, if you want project catalog and create/archive support.
@@ -211,7 +242,15 @@ bin/cmux-project-create --mode create \
   doorbell failure preserves the live workspace, sends no project work, and
   displays “messages remain queued.” If an earlier launcher check fails and
   the new workspace is closed, cleanup attempts identity-safe retirement for
-  both agent wakes.
+  every launched agent's wake.
+- A helper-started agent (Grok, Gemini, Codex on Cursor) counts as ready only
+  when its wake is a live `amq wake` for the room and agent that injects into
+  its exact surface. Until every such wake is confirmed, no start prompt goes
+  to any agent.
+- Adding a pane to a live workspace never closes that workspace. If the new
+  agent fails its checks, only the added pane is closed and only that agent is
+  retired. A missing pane is not re-added while its agent still has a live
+  wake, because the new pane would get a second wake.
 - Create success requires both a progress-file content change and a new local
   update commit after the scaffold baseline.
 - Temporary create/draft files are written under Application Support with
@@ -232,7 +271,12 @@ They cover launch routing, metadata-based project reattach, duplicate-workspace
 prevention, exact-room stale-wake retirement, backlog preservation without
 AMQ body reads, initialization ordering, fail-closed AMQ/cmux state, post-start
 exact-surface wake attachment, prompt submission, create-project gates, and
-Bash 3.2 compatibility.
+Bash 3.2 compatibility. They also pin the pane layout for one to five agents,
+room growth, helper-started wakes that arrive late, never or on the wrong
+pane, and adding panes to a live workspace.
+
+Set `CMUX_PROJECT_LAUNCHER_REAL_AMQ` to an `amq` executable to run the launch
+fixtures' `init` and `doctor` calls against real AMQ.
 
 ## License
 

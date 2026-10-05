@@ -142,6 +142,13 @@ keep_failed_workspace="${CMUX_PROJECT_LAUNCHER_KEEP_FAILED_WORKSPACE:-0}"
 dry_run="${CMUX_PROJECT_LAUNCHER_DRY_RUN:-0}"
 diagnostics_log="${CMUX_PROJECT_LAUNCHER_LOG:-$HOME/Library/Logs/CmuxProjectLauncher/launcher.log}"
 workspace_ref=""
+# Live growth: set when an existing workspace only lacks chosen agents' panes.
+grow_workspace_ref=""
+grow_amq_session=""
+growing_workspace=0
+grow_added_surfaces=()
+# Set by a dry run that would add agents to an existing AMQ room.
+room_growth_planned=0
 launch_ok=0
 reuse_project_session=0
 project_lock_file=""
@@ -245,9 +252,26 @@ cleanup_failed_workspace() {
   local status=$?
   local close_output=""
   local cleanup_agents=""
+  local added_surface
+  local added_closed=1
   trap - EXIT
   if [[ "$status" -ne 0 && "$launch_ok" -ne 1 && -n "${workspace_ref:-}" && "$keep_failed_workspace" != "1" && "$keep_failed_workspace" != "true" ]]; then
-    if ! close_output="$("$cmux_bin" workspace close "$workspace_ref" 2>&1)"; then
+    if [[ "$growing_workspace" -eq 1 ]]; then
+      # Growth never closes the live workspace. Only the panes this run added
+      # are closed, and only the agents added to them are retired.
+      if [[ "${#grow_added_surfaces[@]}" -gt 0 ]]; then
+        for added_surface in "${grow_added_surfaces[@]}"; do
+          if ! close_output="$("$cmux_bin" close-surface --workspace "$workspace_ref" --surface "$added_surface" 2>&1)"; then
+            echo "Failed to close the added pane $added_surface in $workspace_ref: $close_output" >&2
+            added_closed=0
+          fi
+        done
+        if [[ "$added_closed" -eq 1 && -n "${amq_session:-}" ]]; then
+          retire_amq_session "$amq_session" "$launch_retire_csv" || \
+            echo "Failed to retire AMQ wakes for the agents added to session $amq_session; the defect remains unresolved." >&2
+        fi
+      fi
+    elif ! close_output="$("$cmux_bin" workspace close "$workspace_ref" 2>&1)"; then
       echo "Failed to close unsuccessful cmux workspace $workspace_ref: $close_output" >&2
     else
       # Retirement is identity-safe and fail-closed, so conservatively attempt
@@ -271,6 +295,9 @@ if [[ ! -x "$cmux_bin" ]]; then
 fi
 
 existing_agent_health_reason=""
+# Chosen agents with no pane at all in the checked workspace. A workspace whose
+# other chosen agents are healthy gets a pane for each of them (live growth).
+existing_missing_agents=()
 existing_workspace_agents_ready() {
   local target_workspace_ref="$1"
   local target_amq_session="$2"
@@ -288,8 +315,11 @@ existing_workspace_agents_ready() {
   local -a all_surface_rows
   local -a agent_refs
   local -a agent_ids
+  local -a present_agents
   pane_refs=()
   all_surface_rows=()
+  present_agents=()
+  existing_missing_agents=()
 
   if ! pane_rows="$("$cmux_bin" list-panes --workspace "$target_workspace_ref" 2>/dev/null)"; then
     existing_agent_health_reason="its panes could not be inspected"
@@ -328,9 +358,12 @@ existing_workspace_agents_ready() {
     while IFS= read -r row || [[ -n "$row" ]]; do
       [[ -n "$row" ]] && agent_ids+=("$row")
     done < <(printf '%s\n' "$surface_rows" | surface_ids_for_name "$agent_name")
-    if [[ "${#agent_refs[@]}" -ne 1 || "${#agent_ids[@]}" -ne 1 ]]; then
+    if [[ "${#agent_refs[@]}" -eq 0 && "${#agent_ids[@]}" -eq 0 ]]; then
+      existing_missing_agents+=("$agent")
+    elif [[ "${#agent_refs[@]}" -ne 1 || "${#agent_ids[@]}" -ne 1 ]]; then
       surfaces_unique=0
     else
+      present_agents+=("$agent")
       agent_var_set "$agent" existing_ref "${agent_refs[0]}"
       agent_var_set "$agent" existing_id "${agent_ids[0]}"
     fi
@@ -340,14 +373,23 @@ existing_workspace_agents_ready() {
     existing_agent_health_reason="it does not contain exactly $expected_surfaces"
     return 1
   fi
-  for agent in "${launch_agents[@]}"; do
+  # A missing pane is added only for an agent with no live wake. A live wake
+  # (say, from a pane that was closed) would make the new one a second wake.
+  for agent in ${existing_missing_agents[@]+"${existing_missing_agents[@]}"}; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    if agent_wake_lock_live "$target_amq_session" "$agent"; then
+      existing_agent_health_reason="it has no $agent_name pane, but $agent still has a live AMQ wake in session $target_amq_session, so a new $agent_name pane would be a second wake. Retire that wake, then launch again"
+      return 1
+    fi
+  done
+  for agent in ${present_agents[@]+"${present_agents[@]}"}; do
     agent_name="$(agent_field "$agent" surface_name)"
     if ! surface_has_live_runtime "$(agent_var_get "$agent" existing_ref)"; then
       existing_agent_health_reason="its $agent_name surface has no live terminal runtime"
       return 1
     fi
   done
-  for agent in "${launch_agents[@]}"; do
+  for agent in ${present_agents[@]+"${present_agents[@]}"}; do
     agent_name="$(agent_field "$agent" surface_name)"
     if ! wake_targets_surface "$target_amq_session" "$agent" "$(agent_var_get "$agent" existing_id)"; then
       existing_agent_health_reason="its $agent_name AMQ wake is not bound to the exact $agent_name surface"
@@ -355,7 +397,7 @@ existing_workspace_agents_ready() {
     fi
   done
 
-  for agent in "${launch_agents[@]}"; do
+  for agent in ${present_agents[@]+"${present_agents[@]}"}; do
     agent_name="$(agent_field "$agent" surface_name)"
     process_status=0
     surface_has_agent_process "$(agent_var_get "$agent" existing_ref)" "$agent" || process_status=$?
@@ -497,6 +539,14 @@ handle_existing_workspace_state() {
         echo "Project $project already has cmux workspace $chosen_workspace_ref using AMQ session $chosen_amq_session, but $candidate_reason. Opened it for inspection and refused to create another." >&2
       fi
       exit 1
+    fi
+
+    # The workspace is healthy but lacks panes for chosen agents: the main flow
+    # adds those panes to it instead of creating a workspace.
+    if [[ "${#existing_missing_agents[@]}" -gt 0 ]]; then
+      grow_workspace_ref="$chosen_workspace_ref"
+      grow_amq_session="$chosen_amq_session"
+      return 0
     fi
 
     if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
@@ -708,6 +758,7 @@ PY
   if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
     printf 'would add %s to AMQ session: %q init --root %q --agents %q --force\n' \
       "$added" "$amq_bin" "$session_root" "$new_agents"
+    room_growth_planned=1
     return 0
   fi
   if grow_output=$("$amq_bin" init --root "$session_root" --agents "$new_agents" --force 2>&1); then
@@ -730,6 +781,11 @@ ensure_amq_session_initialized() {
   if [[ -f "$session_root/meta/config.json" ]]; then
     if ! grow_amq_session "$session"; then
       return 1
+    fi
+    # A dry run does not grow the room, so doctor would miss the new mailboxes.
+    if [[ "$room_growth_planned" -eq 1 ]]; then
+      printf 'would validate AMQ session %q with amq doctor after the growth\n' "$session"
+      return 0
     fi
     if health_output=$(amq_session_health "$session_root"); then
       return 0
@@ -768,9 +824,20 @@ if ! amq_who_state="$(amq_who_json "$amq_base_root")"; then
   exit 1
 fi
 handle_existing_workspace_state
-amq_session="$(allocate_amq_session)"
+if [[ -n "$grow_workspace_ref" ]]; then
+  amq_session="$grow_amq_session"
+else
+  amq_session="$(allocate_amq_session)"
+fi
 if ! ensure_amq_session_initialized "$amq_session"; then
   exit 1
+fi
+# From here on a growing launch runs only the agents it adds: their panes are
+# the only ones started, attached, named and given a start prompt, and the only
+# ones closed and retired if the launch fails.
+if [[ -n "$grow_workspace_ref" ]]; then
+  growing_workspace=1
+  parse_agent_roster "$(IFS=,; printf '%s' "${existing_missing_agents[*]}")"
 fi
 
 # One (pane name, launcher word, boot name, startup) group per chosen agent, in
@@ -789,14 +856,20 @@ for agent in "${launch_agents[@]}"; do
   )
 done
 
-layout=$(
-  /usr/bin/python3 - "$amq_session" "$workspace_root" "${layout_agent_args[@]}" <<'PY'
+# A new workspace needs the layout JSON. A growing launch needs each new pane's
+# command, one per line, built by the same code so both start agents alike.
+pane_plan_mode=layout
+if [[ "$growing_workspace" -eq 1 ]]; then
+  pane_plan_mode=commands
+fi
+pane_plan=$(
+  /usr/bin/python3 - "$pane_plan_mode" "$amq_session" "$workspace_root" "${layout_agent_args[@]}" <<'PY'
 import json
 import shlex
 import sys
 
-amq_session, workspace_root = sys.argv[1:3]
-agent_args = sys.argv[3:]
+mode, amq_session, workspace_root = sys.argv[1:4]
+agent_args = sys.argv[4:]
 # The launcher words are zsh functions/aliases in ~/.zshrc, so load them through zsh -ic.
 # Claude gets `--name claude-<session>` at boot. The explicit `--` follows the
 # portable amq_claude grammar and forwards the remaining args to `claude`, so the
@@ -818,6 +891,7 @@ def launch_inner(launcher, extra_args=""):
     return command
 
 panes = []
+commands = []
 for index in range(0, len(agent_args), 4):
     surface_name, launcher, boot_name, startup = agent_args[index:index + 4]
     if startup == "helper":
@@ -827,14 +901,20 @@ for index in range(0, len(agent_args), 4):
     else:
         extra_args = "-- --name " + shlex.quote(boot_name) if boot_name else ""
         inner = launch_inner(launcher, extra_args)
+    command = f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(inner)}"
+    commands.append(command)
     surface = {
         "type": "terminal",
         "name": surface_name,
-        "command": f"cd {shlex.quote(workspace_root)} && zsh -ic {shlex.quote(inner)}",
+        "command": command,
     }
     if not panes:
         surface["focus"] = True
     panes.append({"pane": {"surfaces": [surface]}})
+
+if mode == "commands":
+    print("\n".join(commands))
+    sys.exit(0)
 
 def row(cells):
     # Equal columns from nested two-way splits.
@@ -864,9 +944,32 @@ print(json.dumps(layout, separators=(",", ":")))
 PY
 )
 
+layout=""
+pane_commands=()
+if [[ "$growing_workspace" -eq 1 ]]; then
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && pane_commands+=("$row")
+  done <<<"$pane_plan"
+  if [[ "${#pane_commands[@]}" -ne "${#launch_agents[@]}" ]]; then
+    echo "Could not plan the $(launch_agent_names) pane commands for $grow_workspace_ref: $pane_plan" >&2
+    exit 1
+  fi
+else
+  layout="$pane_plan"
+fi
+
 if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
-  printf 'cmux workspace create --name %q --description %q --layout %q --focus true\n' \
-    "$project" "Project launcher: $project (AMQ session: $amq_session)" "$layout"
+  if [[ "$growing_workspace" -eq 1 ]]; then
+    for ((index = 0; index < ${#launch_agents[@]}; index++)); do
+      printf 'cmux new-pane --workspace %q --direction right --command %q --focus false\n' \
+        "$grow_workspace_ref" "${pane_commands[$index]}"
+      printf 'cmux rename-tab --workspace %q --surface <new surface> %q\n' \
+        "$grow_workspace_ref" "$(agent_field "${launch_agents[$index]}" surface_name)"
+    done
+  else
+    printf 'cmux workspace create --name %q --description %q --layout %q --focus true\n' \
+      "$project" "Project launcher: $project (AMQ session: $amq_session)" "$layout"
+  fi
   printf 'allocated AMQ session: %q\n' "$amq_session"
   for agent in "${launch_agents_roster[@]}"; do
     agent_name="$(agent_field "$agent" surface_name)"
@@ -895,59 +998,121 @@ if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
   exit 0
 fi
 
-created=$("$cmux_bin" workspace create \
-  --name "$project" \
-  --description "Project launcher: $project (AMQ session: $amq_session)" \
-  --layout "$layout" \
-  --focus true)
-
-workspace_ref="${created#OK }"
-if [[ -z "$workspace_ref" || "$workspace_ref" == "$created" ]]; then
-  echo "Unexpected cmux workspace create output: $created" >&2
-  exit 1
-fi
-
-# NOTE: bash 3.2 (the system /bin/bash a GUI-launched .app resolves via PATH) has no
-# `mapfile`/`readarray`, so these use the portable current-shell read loop. The
-# `|| [[ -n "$row" ]]` keeps a final newline-less line, matching `mapfile -t`.
-surface_rows=()
-surface_rows_output=""
-if ! surface_rows_output="$(workspace_surface_rows "$workspace_ref" both)"; then
-  echo "Could not inspect $(launch_agent_names) surfaces in $workspace_ref" >&2
-  exit 1
-fi
-while IFS= read -r row || [[ -n "$row" ]]; do
-  [[ -n "$row" ]] && surface_rows+=("$row")
-done <<<"$surface_rows_output"
-
-# Each chosen agent owns exactly one surface, found by its pane name. The ref and
-# the id land in <agent>_surface and <agent>_surface_id.
-surfaces_resolved=1
-for agent in "${launch_agents[@]}"; do
+# add_agent_pane <agent> <command>: splits a new pane off the live workspace,
+# names it like a layout pane so the next launch finds it, and records its
+# surface ref and id. cmux 0.64.25 prints "OK surface:N pane:M workspace:W" for
+# new-pane, and a rename-tab name stays when the agent sets its own terminal
+# title (both probed 2026-10-05).
+add_agent_pane() {
+  local agent="$1"
+  local pane_command="$2"
+  local agent_name
+  local added_output
+  local added_surface
+  local added_pane
+  local rename_output
+  local pane_rows
+  local row
+  local -a named_refs
+  local -a named_ids
+  named_refs=()
+  named_ids=()
   agent_name="$(agent_field "$agent" surface_name)"
-  agent_surfaces=()
-  while IFS= read -r row || [[ -n "$row" ]]; do
-    agent_surfaces+=("$row")
-  done < <(printf '%s\n' "${surface_rows[@]}" | surface_refs_for_name "$agent_name")
-  agent_surface_ids=()
-  while IFS= read -r row || [[ -n "$row" ]]; do
-    agent_surface_ids+=("$row")
-  done < <(printf '%s\n' "${surface_rows[@]}" | surface_ids_for_name "$agent_name")
-  if [[ "${#agent_surfaces[@]}" -ne 1 || "${#agent_surface_ids[@]}" -ne 1 ]]; then
-    surfaces_resolved=0
-  else
-    agent_var_set "$agent" surface "${agent_surfaces[0]}"
-    agent_var_set "$agent" surface_id "${agent_surface_ids[0]}"
+  if ! added_output="$("$cmux_bin" new-pane --workspace "$workspace_ref" --direction right --command "$pane_command" --focus false 2>&1)"; then
+    echo "Could not add a $agent_name pane to $workspace_ref: $added_output" >&2
+    return 1
   fi
-done
+  added_surface="$(printf '%s\n' "$added_output" | extract_cmux_refs surface | head -n 1)"
+  added_pane="$(printf '%s\n' "$added_output" | extract_cmux_refs pane | head -n 1)"
+  if [[ "$added_output" != OK* || -z "$added_surface" || -z "$added_pane" ]]; then
+    echo "Unexpected cmux new-pane output for $agent_name in $workspace_ref: $added_output" >&2
+    return 1
+  fi
+  grow_added_surfaces+=("$added_surface")
+  if ! rename_output="$("$cmux_bin" rename-tab --workspace "$workspace_ref" --surface "$added_surface" "$agent_name" 2>&1)"; then
+    echo "Could not name the new $agent_name pane $added_surface in $workspace_ref: $rename_output" >&2
+    return 1
+  fi
+  if ! pane_rows="$("$cmux_bin" --id-format both list-pane-surfaces --workspace "$workspace_ref" --pane "$added_pane" 2>&1)"; then
+    echo "cmux list-pane-surfaces failed for $workspace_ref/$added_pane: $pane_rows" >&2
+    return 1
+  fi
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && named_refs+=("$row")
+  done < <(printf '%s\n' "$pane_rows" | surface_refs_for_name "$agent_name")
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && named_ids+=("$row")
+  done < <(printf '%s\n' "$pane_rows" | surface_ids_for_name "$agent_name")
+  if [[ "${#named_refs[@]}" -ne 1 || "${#named_ids[@]}" -ne 1 || "${named_refs[0]}" != "$added_surface" ]]; then
+    echo "The new pane $added_surface in $workspace_ref did not take the name $agent_name: $pane_rows" >&2
+    return 1
+  fi
+  agent_var_set "$agent" surface "$added_surface"
+  agent_var_set "$agent" surface_id "${named_ids[0]}"
+}
 
-if [[ "$surfaces_resolved" -ne 1 ]]; then
-  echo "Could not resolve unique $(launch_agent_names) surface refs/ids by name in $workspace_ref" >&2
-  printf 'Surface rows:\n' >&2
-  printf '%s\n' "${surface_rows[@]}" >&2
-  "$cmux_bin" list-panes --workspace "$workspace_ref" >&2 || true
-  "$cmux_bin" list-pane-surfaces --workspace "$workspace_ref" >&2 || true
-  exit 1
+if [[ "$growing_workspace" -eq 1 ]]; then
+  workspace_ref="$grow_workspace_ref"
+  for ((index = 0; index < ${#launch_agents[@]}; index++)); do
+    if ! add_agent_pane "${launch_agents[$index]}" "${pane_commands[$index]}"; then
+      exit 1
+    fi
+  done
+else
+  created=$("$cmux_bin" workspace create \
+    --name "$project" \
+    --description "Project launcher: $project (AMQ session: $amq_session)" \
+    --layout "$layout" \
+    --focus true)
+
+  workspace_ref="${created#OK }"
+  if [[ -z "$workspace_ref" || "$workspace_ref" == "$created" ]]; then
+    echo "Unexpected cmux workspace create output: $created" >&2
+    exit 1
+  fi
+
+  # NOTE: bash 3.2 (the system /bin/bash a GUI-launched .app resolves via PATH) has no
+  # `mapfile`/`readarray`, so these use the portable current-shell read loop. The
+  # `|| [[ -n "$row" ]]` keeps a final newline-less line, matching `mapfile -t`.
+  surface_rows=()
+  surface_rows_output=""
+  if ! surface_rows_output="$(workspace_surface_rows "$workspace_ref" both)"; then
+    echo "Could not inspect $(launch_agent_names) surfaces in $workspace_ref" >&2
+    exit 1
+  fi
+  while IFS= read -r row || [[ -n "$row" ]]; do
+    [[ -n "$row" ]] && surface_rows+=("$row")
+  done <<<"$surface_rows_output"
+
+  # Each chosen agent owns exactly one surface, found by its pane name. The ref and
+  # the id land in <agent>_surface and <agent>_surface_id.
+  surfaces_resolved=1
+  for agent in "${launch_agents[@]}"; do
+    agent_name="$(agent_field "$agent" surface_name)"
+    agent_surfaces=()
+    while IFS= read -r row || [[ -n "$row" ]]; do
+      agent_surfaces+=("$row")
+    done < <(printf '%s\n' "${surface_rows[@]}" | surface_refs_for_name "$agent_name")
+    agent_surface_ids=()
+    while IFS= read -r row || [[ -n "$row" ]]; do
+      agent_surface_ids+=("$row")
+    done < <(printf '%s\n' "${surface_rows[@]}" | surface_ids_for_name "$agent_name")
+    if [[ "${#agent_surfaces[@]}" -ne 1 || "${#agent_surface_ids[@]}" -ne 1 ]]; then
+      surfaces_resolved=0
+    else
+      agent_var_set "$agent" surface "${agent_surfaces[0]}"
+      agent_var_set "$agent" surface_id "${agent_surface_ids[0]}"
+    fi
+  done
+
+  if [[ "$surfaces_resolved" -ne 1 ]]; then
+    echo "Could not resolve unique $(launch_agent_names) surface refs/ids by name in $workspace_ref" >&2
+    printf 'Surface rows:\n' >&2
+    printf '%s\n' "${surface_rows[@]}" >&2
+    "$cmux_bin" list-panes --workspace "$workspace_ref" >&2 || true
+    "$cmux_bin" list-pane-surfaces --workspace "$workspace_ref" >&2 || true
+    exit 1
+  fi
 fi
 
 agent_readiness_error() {
@@ -960,6 +1125,7 @@ agent_readiness_error() {
   local debug_blocks=""
   local screen_blocks=""
   local refusal
+  local created_phrase
   local helper_note=""
   if [[ "${#launch_agents[@]}" -eq 1 ]]; then
     sessions_phrase="the agent session is"
@@ -983,8 +1149,13 @@ its coop bootstrap logs the attempt to ~/Library/Logs/CmuxProjectLauncher/launch
   if [[ -z "$start_commands" ]]; then
     refusal="Refusing to report a launch until $sessions_phrase confirmed."
   fi
+  if [[ "$growing_workspace" -eq 1 ]]; then
+    created_phrase="cmux added $(launch_agent_names) to $workspace_ref"
+  else
+    created_phrase="cmux created $workspace_ref"
+  fi
   cat >&2 <<ERR
-cmux created $workspace_ref, but the $(launch_agent_names /) tabs did not pass readiness checks.
+$created_phrase, but the $(launch_agent_names /) tabs did not pass readiness checks.
 $reason
 $refusal
 
@@ -1323,4 +1494,8 @@ for agent in "${launch_agents[@]}"; do
 done
 
 launch_ok=1
-echo "Launched $project in $workspace_ref using AMQ session $amq_session"
+if [[ "$growing_workspace" -eq 1 ]]; then
+  echo "Added $(launch_agent_names) to $project in $workspace_ref using AMQ session $amq_session"
+else
+  echo "Launched $project in $workspace_ref using AMQ session $amq_session"
+fi
