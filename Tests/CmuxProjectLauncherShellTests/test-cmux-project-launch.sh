@@ -692,7 +692,12 @@ JSON
     printf 'new-pane\t%s\t%s\n' "$agent" "$pane_command" >>"${CMUX_FAKE_EVENT_LOG:?}"
     read -r slot_pane slot_surface _ _ _ <<<"$(fake_slot "$agent")"
     fake_attach_helper "$agent" "${CMUX_FAKE_EXPECT_SESSION:-demo-project}"
-    printf 'OK %s %s %s\n' "$slot_surface" "$slot_pane" "$target_workspace"
+    # no-pane: the pane exists, but the output lacks its pane ref.
+    if [[ "${CMUX_FAKE_NEW_PANE_OUTPUT:-}" == "no-pane" ]]; then
+      printf 'OK %s %s\n' "$slot_surface" "$target_workspace"
+    else
+      printf 'OK %s %s %s\n' "$slot_surface" "$slot_pane" "$target_workspace"
+    fi
     ;;
   rename-tab)
     surface=""
@@ -890,6 +895,11 @@ JSON
     printf 'doctor\t%s\n' "$root" >>"${CMUX_FAKE_EVENT_LOG:?}"
     if [[ -n "${CMUX_FAKE_AMQ_DOCTOR_EXIT:-}" ]]; then
       exit "$CMUX_FAKE_AMQ_DOCTOR_EXIT"
+    fi
+    # Fails only once this room was initialized or grown in the current case.
+    if [[ -n "${CMUX_FAKE_AMQ_DOCTOR_EXIT_AFTER_INIT:-}" ]] \
+      && grep -Fq $'init\t'"$root"$'\t' "${CMUX_FAKE_EVENT_LOG:?}"; then
+      exit "$CMUX_FAKE_AMQ_DOCTOR_EXIT_AFTER_INIT"
     fi
     if [[ -n "${CMUX_PROJECT_LAUNCHER_REAL_AMQ:-}" ]]; then
       exec "$CMUX_PROJECT_LAUNCHER_REAL_AMQ" doctor "${original_args[@]}"
@@ -1524,7 +1534,7 @@ grep -Fq 'Config=error' "$tmp_dir/stderr.log"
 [[ ! -s "$create_log" ]]
 
 # A project without its own agent choice keeps its existing room's agents
-# (Ohad, 2026-10-04). Before agent rosters this claude-only room was refused,
+# (owner decision, 2026-10-04). Before agent rosters this claude-only room was refused,
 # because the launcher could only start the Codex + Claude pair; now it launches
 # Claude alone. Doctor still has to confirm the room's own mailboxes.
 wrong_agent_root="$fake_amq_root/demo-project-wrong-agent"
@@ -3473,7 +3483,7 @@ grep -Fq '"agents":["claude","user"]' "$fake_amq_root/room-grow-fails/meta/confi
 # Helper agents: Grok, Gemini and Codex on Cursor start through coopgrok,
 # coopgemini and coopcursorcodex exactly as typed. Their own bootstrap attaches
 # the wake on their exact pane; the launcher only waits for that wake and sends
-# them no attach, rename, backlog doorbell or start prompt (Ohad, 2026-10-04).
+# them no attach, rename, backlog doorbell or start prompt (owner decision, 2026-10-04).
 
 # event_count <kind>: how many event-log lines start with <kind>.
 event_count() {
@@ -3649,7 +3659,7 @@ grep -Fq 'its Gemini surface has no live Gemini process' "$tmp_dir/stderr.log"
 [[ ! -s "$send_log" ]]
 
 # Live growth: a ticked agent whose pane a live workspace lacks gets a new pane
-# there (Ohad, 2026-10-04). The room grows first, the pane is named for the
+# there (owner decision, 2026-10-04). The room grows first, the pane is named for the
 # next launch's checks, and the agents already running are left alone.
 live_room_args=(
   CMUX_FAKE_AMQ_WHO_MODE=expected-active
@@ -3821,5 +3831,110 @@ if grep -Fq 'start demo-project' "$send_log"; then
   exit 1
 fi
 [[ ! -s "$close_log" ]]
+
+# --- Room and growth cases from the 2026-10-05 audit ---
+
+# A room that fails the read-only doctor is refused before growth: amq init
+# --force must not rewrite a damaged room before it is judged.
+make_fake_room "$fake_amq_root/room-damaged-grow" claude codex user
+rm -rf "$fake_amq_root/room-damaged-grow/agents/codex"
+room_case room-damaged-grow CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex,grok CMUX_FAKE_AMQ_DOCTOR_MODE=mailboxes-error CMUX_FAKE_EXPECT_ROSTER=claude,codex,user,grok
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'failed read-only AMQ doctor validation' "$tmp_dir/stderr.log"
+[[ "$(event_count init)" -eq 0 ]]
+[[ ! -s "$create_log" ]]
+grep -Fq '"agents":["claude","codex","user"]' "$fake_amq_root/room-damaged-grow/meta/config.json"
+
+# When doctor fails only after a growth succeeded, the message says the room
+# was changed instead of claiming it was left alone.
+make_fake_room "$fake_amq_root/room-grown-unhealthy" claude user
+room_case room-grown-unhealthy CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex CMUX_FAKE_EXPECT_ROSTER=claude,user,codex CMUX_FAKE_AMQ_DOCTOR_EXIT_AFTER_INIT=3
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'Added codex to AMQ room room-grown-unhealthy, but read-only AMQ doctor validation then failed' "$tmp_dir/stderr.log"
+if grep -Fq 'refusing to modify it' "$tmp_dir/stderr.log"; then
+  printf 'a grown room was reported as unmodified\n' >&2
+  exit 1
+fi
+[[ ! -s "$create_log" ]]
+
+# Growth keeps queued mail: a message waiting in Claude's inbox is still there,
+# unread, after Codex is added. Under CMUX_PROJECT_LAUNCHER_REAL_AMQ the message
+# is sent and the room grown by real AMQ.
+make_fake_room "$fake_amq_root/room-grows-mail" claude user
+if [[ -n "${CMUX_PROJECT_LAUNCHER_REAL_AMQ:-}" ]]; then
+  "$CMUX_PROJECT_LAUNCHER_REAL_AMQ" send --root "$fake_amq_root/room-grows-mail" --me user --to claude \
+    --subject queued --body 'queued before growth' >/dev/null 2>&1
+else
+  printf 'queued before growth\n' >"$fake_amq_root/room-grows-mail/agents/claude/inbox/new/queued-1.md"
+fi
+queued_before="$(ls "$fake_amq_root/room-grows-mail/agents/claude/inbox/new")"
+[[ -n "$queued_before" ]]
+room_case room-grows-mail CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex CMUX_FAKE_EXPECT_ROSTER=claude,user,codex
+[[ "$room_case_status" -eq 0 ]]
+grep -Fxq $'init\t'"$fake_amq_root/room-grows-mail"$'\tclaude,user,codex\tforce' "$event_log"
+[[ "$(ls "$fake_amq_root/room-grows-mail/agents/claude/inbox/new")" == "$queued_before" ]]
+
+# A room that lists no agent this launcher can start keeps its agents: the
+# default is not added to it, and the launch stops with the handles named.
+make_fake_room "$fake_amq_root/room-foreign" fable user
+room_case room-foreign CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS=claude CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=fable,user,claude
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'AMQ room room-foreign lists no agent this launcher can start (fable)' "$tmp_dir/stderr.log"
+[[ "$(event_count init)" -eq 0 ]]
+[[ ! -s "$create_log" ]]
+
+# With no own choice, the agents come from the room the live workspace uses,
+# not from the room named after the project.
+make_fake_room "$fake_amq_root/suffix-room" claude grok user
+make_fake_room "$fake_amq_root/suffix-room-2" claude user
+setup_fake_wakes suffix-room-2 claude
+room_case suffix-room "${live_room_args[@]}" CMUX_FAKE_EXPECT_SESSION=suffix-room-2 CMUX_FAKE_AGENT_ROSTER=claude
+[[ "$room_case_status" -eq 0 ]]
+grep -Fq 'Reattached suffix-room in workspace:7 using AMQ session suffix-room-2' "$stdout_log"
+[[ "$(event_count init)" -eq 0 ]]
+[[ "$(event_count new-pane)" -eq 0 ]]
+
+# A wake lock whose process cannot be inspected is not treated as gone: the
+# launcher refuses to add a second pane for that agent.
+# Only the wake-lock identity probe (`ps -p <pid> -o command=`) fails; every
+# other ps call reaches the suite's fake ps.
+failing_ps_dir="$tmp_dir/failing-ps"
+mkdir -p "$failing_ps_dir"
+cat >"$failing_ps_dir/ps" <<'SH'
+#!/bin/sh
+if [ "$#" -eq 4 ] && [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "command=" ]; then
+  exit 1
+fi
+exec "$CMUX_FAKE_PS_BEHIND" "$@"
+SH
+chmod +x "$failing_ps_dir/ps"
+make_fake_room "$fake_amq_root/live-wake-unverified" claude grok user
+setup_fake_wakes live-wake-unverified claude grok
+room_case live-wake-unverified "${live_room_args[@]}" CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_PS_BEHIND="$fake_ps" PATH="$failing_ps_dir:$PATH" CMUX_PROJECT_LAUNCHER_PS="$failing_ps_dir/ps"
+[[ "$(event_count new-pane)" -eq 0 ]]
+[[ "$(event_count init)" -eq 0 ]]
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'could not be verified' "$tmp_dir/stderr.log"
+
+# A new pane whose cmux output does not parse is still closed when the growth
+# fails.
+make_fake_room "$fake_amq_root/live-grow-odd-output" claude user
+setup_fake_wakes live-grow-odd-output claude
+room_case live-grow-odd-output "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,grok CMUX_FAKE_NEW_PANE_OUTPUT=no-pane
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'Unexpected cmux new-pane output' "$tmp_dir/stderr.log"
+grep -Fxq $'close-surface\tsurface:28' "$event_log"
+
+# Helpers share one readiness deadline: two helpers that never attach fail
+# after one poll period, not one period each.
+helper_deadline_start=$SECONDS
+room_case two-slow-helpers CMUX_PROJECT_LAUNCHER_AGENTS=grok,gemini CMUX_FAKE_AGENT_ROSTER=grok,gemini CMUX_FAKE_EXPECT_ROSTER=grok,gemini,user CMUX_FAKE_HELPER_WAKE_SKIP=grok,gemini CMUX_PROJECT_LAUNCHER_POLL=8
+helper_deadline_elapsed=$((SECONDS - helper_deadline_start))
+[[ "$room_case_status" -eq 1 ]]
+grep -Fq 'no AMQ wake for grok' "$tmp_dir/stderr.log"
+if (( helper_deadline_elapsed >= 14 )); then
+  printf 'two never-attaching helpers took %ss; they should share one 8s deadline\n' "$helper_deadline_elapsed" >&2
+  exit 1
+fi
 
 printf 'ok - cmux project launch shell fixtures passed\n'

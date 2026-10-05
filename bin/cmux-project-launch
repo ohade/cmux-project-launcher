@@ -5,9 +5,10 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: cmux-project-launch [--no-start] <project>
 
-Creates a cmux workspace with Codex and Claude panes, names each agent session
-after the project (Claude via `claude --name claude-<project>` at boot, Codex via
-a post-boot `/rename codex-<project>`), then sends:
+Creates a cmux workspace with one pane per chosen agent (by default Codex and
+Claude; see CMUX_PROJECT_LAUNCHER_AGENTS below), names each Codex and Claude
+session after the project (Claude via `claude --name claude-<project>` at boot,
+Codex via a post-boot `/rename codex-<project>`), then sends:
   Codex: $start <project>
   Claude: /start <project>
 
@@ -147,8 +148,6 @@ grow_workspace_ref=""
 grow_amq_session=""
 growing_workspace=0
 grow_added_surfaces=()
-# Set by a dry run that would add agents to an existing AMQ room.
-room_growth_planned=0
 launch_ok=0
 reuse_project_session=0
 project_lock_file=""
@@ -309,6 +308,7 @@ existing_workspace_agents_ready() {
   local row
   local agent
   local agent_name
+  local wake_status
   local expected_surfaces=""
   local surfaces_unique=1
   local -a pane_refs
@@ -377,10 +377,18 @@ existing_workspace_agents_ready() {
   # (say, from a pane that was closed) would make the new one a second wake.
   for agent in ${existing_missing_agents[@]+"${existing_missing_agents[@]}"}; do
     agent_name="$(agent_field "$agent" surface_name)"
-    if agent_wake_lock_live "$target_amq_session" "$agent"; then
-      existing_agent_health_reason="it has no $agent_name pane, but $agent still has a live AMQ wake in session $target_amq_session, so a new $agent_name pane would be a second wake. Retire that wake, then launch again"
-      return 1
-    fi
+    wake_status=0
+    agent_wake_lock_live "$target_amq_session" "$agent" || wake_status=$?
+    case "$wake_status" in
+      0)
+        existing_agent_health_reason="it has no $agent_name pane, but $agent still has a live AMQ wake in session $target_amq_session, so a new $agent_name pane would be a second wake. Retire that wake, then launch again"
+        return 1
+        ;;
+      2)
+        existing_agent_health_reason="it has no $agent_name pane, and the AMQ wake lock for $agent in session $target_amq_session could not be verified (unreadable lock, or a running process that could not be inspected), so a new $agent_name pane might be a second wake. Check that wake, then launch again"
+        return 1
+        ;;
+    esac
   done
   for agent in ${present_agents[@]+"${present_agents[@]}"}; do
     agent_name="$(agent_field "$agent" surface_name)"
@@ -488,6 +496,8 @@ handle_existing_workspace_state() {
             ;;
         esac
         if [[ -z "$candidate_reason" ]]; then
+          # The workspace's own room, which can be suffixed, decides its agents.
+          resolve_launch_agents "$candidate_session"
           agent_health_status=0
           existing_workspace_agents_ready "$candidate_ref" "$candidate_session" || agent_health_status=$?
           if [[ "$agent_health_status" -ne 0 ]]; then
@@ -619,10 +629,14 @@ allocate_amq_session() {
   printf '%s\n' "$candidate"
 }
 
+# amq_session_health <session-root> [handle...]: 0 when AMQ's read-only doctor
+# passes Config and Mailboxes and each named handle has a configured, healthy
+# mailbox; otherwise prints the problems and returns 1.
 amq_session_health() {
   local session_root="$1"
   local doctor_output=""
   local doctor_status=0
+  shift
 
   # stderr MUST NOT be merged into stdout here: doctor_output is parsed as JSON, and
   # amq writes an "update available" notice to stderr on every invocation. With 2>&1
@@ -672,15 +686,19 @@ for handle in sys.argv[1:]:
 if problems:
     print("; ".join(problems))
     raise SystemExit(1)
-' "${launch_agents_roster[@]}" <<<"$doctor_output"
+' "$@" <<<"$doctor_output"
 }
 
-# Which agents this launch starts, when the project made no choice of its own: an
-# existing room keeps its agents (Ohad, 2026-10-04), and a new room starts with the
-# app's Settings default. A room handle this launcher cannot start is named and
-# skipped. Runs under the project lock, before any AMQ or cmux change.
+# resolve_launch_agents [session]: which agents this launch starts, when the
+# project made no choice of its own. An existing room keeps its agents (owner
+# decision, 2026-10-04), and a new room starts with the app's Settings default.
+# The room is the session the launch will use, which can be a suffixed one such
+# as <project>-2. A room handle this launcher cannot start is named and skipped;
+# a room with no handle it can start stops the launch. Runs under the project
+# lock, before any AMQ or cmux change.
 resolve_launch_agents() {
-  local config="$amq_base_root/$project/meta/config.json"
+  local session="${1:-$project}"
+  local config="$amq_base_root/$session/meta/config.json"
   local handles=""
   local handle
   local known=""
@@ -695,9 +713,13 @@ resolve_launch_agents() {
         unknown="${unknown:+$unknown, }$handle"
       fi
     done <<<"$handles"
-    if [[ -n "$known" ]] && parse_agent_roster "$known"; then
+    if [[ -z "$known" ]]; then
+      echo "AMQ room $session lists no agent this launcher can start (${unknown:-it lists none}). Choose this project's agents in the app's Agents menu, or set CMUX_PROJECT_LAUNCHER_AGENTS. Created nothing." >&2
+      exit 1
+    fi
+    if parse_agent_roster "$known"; then
       if [[ -n "$unknown" ]]; then
-        echo "AMQ room $project also lists $unknown, which this launcher cannot start; launching $(launch_agent_names)." >&2
+        echo "AMQ room $session also lists $unknown, which this launcher cannot start; launching $(launch_agent_names)." >&2
       fi
       return 0
     fi
@@ -708,20 +730,26 @@ resolve_launch_agents() {
   fi
 }
 
-# Adds chosen agents that an existing room lacks, before any workspace exists.
-# `amq init --force` on AMQ 0.77.3 keeps every mailbox and queued message (probed
-# 2026-10-04) but rewrites config.json: it resets created_utc and drops any key
-# besides version, created_utc and agents. A room with such keys is therefore
-# not grown. The room's own handle list is kept and the new agents are appended.
-grow_amq_session() {
+# plan_room_growth <session>: compares an existing room with the chosen agents.
+# Sets room_growth_agents (the room's handles, then the missing ones),
+# room_growth_added (the missing ones; empty when none) and room_present_agents
+# (chosen agents the room already lists). Returns 1, after saying why, when the
+# room cannot be grown. `amq init --force` on AMQ 0.77.3 keeps every mailbox and
+# queued message (probed 2026-10-04) but rewrites config.json: it resets
+# created_utc and drops any key besides version, created_utc and agents. A room
+# with such keys is therefore not grown.
+room_growth_agents=""
+room_growth_added=""
+room_present_agents=()
+plan_room_growth() {
   local session="$1"
   local session_root="$amq_base_root/$session"
   local plan=""
   local plan_status=0
-  local new_agents
-  local added
-  local grow_output=""
-  local grow_status=0
+  local present
+  room_growth_agents=""
+  room_growth_added=""
+  room_present_agents=()
   plan="$(/usr/bin/python3 - "$session_root/meta/config.json" "${launch_agents_roster[@]}" <<'PY'
 import json
 import sys
@@ -742,7 +770,8 @@ extra = sorted(set(config) - {"version", "created_utc", "agents"})
 if extra:
     print(",".join(missing) + "\t" + ", ".join(extra))
     sys.exit(3)
-print(",".join(agents + missing) + "\t" + ",".join(missing))
+present = [agent for agent in sys.argv[2:] if agent in agents]
+print(",".join(agents + missing) + "\t" + ",".join(missing) + "\t" + ",".join(present))
 PY
 )" || plan_status=$?
   if [[ "$plan_status" -eq 3 ]]; then
@@ -753,22 +782,29 @@ PY
     return 1
   fi
   [[ -z "$plan" ]] && return 0
-  new_agents="${plan%%$'\t'*}"
-  added="${plan#*$'\t'}"
-  if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
-    printf 'would add %s to AMQ session: %q init --root %q --agents %q --force\n' \
-      "$added" "$amq_bin" "$session_root" "$new_agents"
-    room_growth_planned=1
-    return 0
+  room_growth_agents="${plan%%$'\t'*}"
+  plan="${plan#*$'\t'}"
+  room_growth_added="${plan%%$'\t'*}"
+  present="${plan#*$'\t'}"
+  if [[ -n "$present" ]]; then
+    IFS=',' read -r -a room_present_agents <<<"$present"
   fi
-  if grow_output=$("$amq_bin" init --root "$session_root" --agents "$new_agents" --force 2>&1); then
+}
+
+# add_room_agents <session>: runs the growth plan_room_growth computed.
+add_room_agents() {
+  local session="$1"
+  local session_root="$amq_base_root/$session"
+  local grow_output=""
+  local grow_status=0
+  if grow_output=$("$amq_bin" init --root "$session_root" --agents "$room_growth_agents" --force 2>&1); then
     :
   else
     grow_status=$?
-    echo "Could not add ${added//,/, } to AMQ room $session (exit $grow_status): $grow_output. Created nothing." >&2
+    echo "Could not add ${room_growth_added//,/, } to AMQ room $session (exit $grow_status): $grow_output. Created nothing." >&2
     return 1
   fi
-  echo "Added ${added//,/, } to AMQ room $session." >&2
+  echo "Added ${room_growth_added//,/, } to AMQ room $session." >&2
 }
 
 ensure_amq_session_initialized() {
@@ -779,19 +815,37 @@ ensure_amq_session_initialized() {
   local init_status=0
 
   if [[ -f "$session_root/meta/config.json" ]]; then
-    if ! grow_amq_session "$session"; then
+    if ! plan_room_growth "$session"; then
+      return 1
+    fi
+    if [[ -z "$room_growth_added" ]]; then
+      if health_output=$(amq_session_health "$session_root" "${launch_agents_roster[@]}"); then
+        return 0
+      fi
+      echo "AMQ session $session at $session_root failed read-only AMQ doctor validation; refusing to modify it or create a cmux workspace: $health_output" >&2
+      return 1
+    fi
+    # Judge the room as it stands, for the chosen agents it already has, before
+    # amq init --force rewrites it.
+    if ! health_output=$(amq_session_health "$session_root" ${room_present_agents[@]+"${room_present_agents[@]}"}); then
+      echo "AMQ session $session at $session_root failed read-only AMQ doctor validation; refusing to modify it or create a cmux workspace: $health_output" >&2
       return 1
     fi
     # A dry run does not grow the room, so doctor would miss the new mailboxes.
-    if [[ "$room_growth_planned" -eq 1 ]]; then
+    if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
+      printf 'would add %s to AMQ session: %q init --root %q --agents %q --force\n' \
+        "$room_growth_added" "$amq_bin" "$session_root" "$room_growth_agents"
       printf 'would validate AMQ session %q with amq doctor after the growth\n' "$session"
       return 0
     fi
-    if health_output=$(amq_session_health "$session_root"); then
-      return 0
+    if ! add_room_agents "$session"; then
+      return 1
     fi
-    echo "AMQ session $session at $session_root failed read-only AMQ doctor validation; refusing to modify it or create a cmux workspace: $health_output" >&2
-    return 1
+    if ! health_output=$(amq_session_health "$session_root" "${launch_agents_roster[@]}"); then
+      echo "Added ${room_growth_added//,/, } to AMQ room $session, but read-only AMQ doctor validation then failed; refusing to create a cmux workspace: $health_output" >&2
+      return 1
+    fi
+    return 0
   fi
   if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
     printf 'would initialize AMQ session: %q init --root %q --agents %q\n' \
@@ -805,7 +859,7 @@ ensure_amq_session_initialized() {
     echo "Could not initialize AMQ session $session at $session_root (exit $init_status): $init_output" >&2
     return 1
   fi
-  if ! health_output=$(amq_session_health "$session_root"); then
+  if ! health_output=$(amq_session_health "$session_root" "${launch_agents_roster[@]}"); then
     echo "AMQ initialized session $session at $session_root but read-only AMQ doctor validation failed; refusing to create a cmux workspace: $health_output" >&2
     return 1
   fi
@@ -828,6 +882,10 @@ if [[ -n "$grow_workspace_ref" ]]; then
   amq_session="$grow_amq_session"
 else
   amq_session="$(allocate_amq_session)"
+  # A new workspace can get a suffixed room; that room decides its agents too.
+  if [[ "$amq_session" != "$project" ]]; then
+    resolve_launch_agents "$amq_session"
+  fi
 fi
 if ! ensure_amq_session_initialized "$amq_session"; then
   exit 1
@@ -1027,11 +1085,15 @@ add_agent_pane() {
   fi
   added_surface="$(printf '%s\n' "$added_output" | extract_cmux_refs surface | head -n 1)"
   added_pane="$(printf '%s\n' "$added_output" | extract_cmux_refs pane | head -n 1)"
+  # Track any surface cmux named before judging the rest, so a pane created
+  # with output we cannot parse is still closed if the growth fails.
+  if [[ -n "$added_surface" ]]; then
+    grow_added_surfaces+=("$added_surface")
+  fi
   if [[ "$added_output" != OK* || -z "$added_surface" || -z "$added_pane" ]]; then
     echo "Unexpected cmux new-pane output for $agent_name in $workspace_ref: $added_output" >&2
     return 1
   fi
-  grow_added_surfaces+=("$added_surface")
   if ! rename_output="$("$cmux_bin" rename-tab --workspace "$workspace_ref" --surface "$added_surface" "$agent_name" 2>&1)"; then
     echo "Could not name the new $agent_name pane $added_surface in $workspace_ref: $rename_output" >&2
     return 1
@@ -1204,6 +1266,9 @@ wait_agent_ready() {
   return 1
 }
 
+# All helper agents share one wake deadline, set when their wait starts, so a
+# launch with several stuck helpers fails after one poll period, not one each.
+helper_wake_deadline=""
 wait_helper_wake() {
   # A helper-started agent is ready once its bootstrap's AMQ wake is a live
   # `amq wake` for this room and agent that injects into this exact surface.
@@ -1217,7 +1282,8 @@ wait_helper_wake() {
     agent_not_ready_reason="cmux reported no live terminal tty for $surface"
     return 1
   fi
-  deadline=$((SECONDS + poll_seconds))
+  [[ -n "$helper_wake_deadline" ]] || helper_wake_deadline=$((SECONDS + poll_seconds))
+  deadline="$helper_wake_deadline"
   while true; do
     if wake_targets_surface "$amq_session" "$agent" "$surface_id"; then
       return 0

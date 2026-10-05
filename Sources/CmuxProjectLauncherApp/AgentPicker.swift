@@ -43,9 +43,11 @@ struct AgentBadge: View {
 }
 
 /// The toolbar control for the selected project's agents. The button shows the
-/// project's own choice as badges, so it reads without opening anything. The
-/// checkboxes live in a popover rather than a menu, because a menu closes on
-/// every click and Ohad wants to tick several agents in one go (2026-10-05).
+/// agents as badges, so it reads without opening anything: the project's own
+/// choice, or else the Settings default, faded and labelled "Default" because an
+/// existing room keeps its own agents. The checkboxes live in a popover rather
+/// than a menu, because a menu closes on every click and the owner wants to tick
+/// several agents in one go (2026-10-05).
 struct AgentPickerButton: View {
     @ObservedObject var model: LauncherViewModel
     @State private var isPresented = false
@@ -57,22 +59,19 @@ struct AgentPickerButton: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "person.2")
-                if let ownChoice {
-                    Text("Agents")
-                    HStack(spacing: 3) {
-                        ForEach(ownChoice.orderedAgents) { agent in
-                            AgentBadge(agent: agent)
-                        }
+                Text(ownChoice == nil ? "Default" : "Agents")
+                HStack(spacing: 3) {
+                    ForEach((ownChoice ?? model.defaultAgents).orderedAgents) { agent in
+                        AgentBadge(agent: agent)
                     }
-                } else {
-                    Text("Agents: Default")
                 }
+                .opacity(ownChoice == nil ? 0.55 : 1)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
         }
-        .accessibilityLabel("Agents: \(ownChoice?.title ?? "Default")")
+        .accessibilityLabel("Agents: \(ownChoice?.title ?? "Default, \(model.defaultAgents.title)")")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             AgentPickerPanel(model: model)
         }

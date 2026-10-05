@@ -60,7 +60,7 @@ known_agents_pipeline=(codex claude grok gemini cursorcodex)
 #             its banner, attaches the wake, names it and sends its start command.
 #   helper    the pane runs the coop helper exactly as typed (coopgrok <session>);
 #             the helper's bootstrap names the agent and attaches the wake on its
-#             own pane. The launcher only waits for that wake (Ohad, 2026-10-04).
+#             own pane. The launcher only waits for that wake (owner decision, 2026-10-04).
 # Pane names are single tokens because surface_refs_for_name matches one token:
 # "Cursor Codex" would also match the Codex pane.
 agent_field() {
@@ -544,8 +544,12 @@ PY
 wake_lock_active() {
   local session="$1"
   local agent
+  local wake_status
   for agent in "${known_agents_pipeline[@]}"; do
-    if agent_wake_lock_live "$session" "$agent"; then
+    wake_status=0
+    agent_wake_lock_live "$session" "$agent" || wake_status=$?
+    # An unverifiable wake (status 2) counts as active: the safe answer.
+    if [[ "$wake_status" -eq 0 || "$wake_status" -eq 2 ]]; then
       return 0
     fi
   done
@@ -553,8 +557,9 @@ wake_lock_active() {
 }
 
 # agent_wake_lock_live <session> <agent>: 0 when the agent's .wake.lock names a
-# live `amq wake` process, and also when the lock cannot be read (the safe
-# answer); 1 when there is no lock or its process is gone.
+# live `amq wake` process; 1 when there is no lock or its process is gone; 2
+# when the wake cannot be verified, because the lock is unreadable or the live
+# process could not be inspected. Callers treat 2 as live.
 agent_wake_lock_live() {
   local session="$1"
   local agent="$2"
@@ -585,14 +590,18 @@ PY
   case "$pid_status" in
     0)
       if kill -0 "$pid" 2>/dev/null; then
-        command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+        if ! command_line="$(ps -p "$pid" -o command= 2>/dev/null)"; then
+          # Gone since kill -0: no wake. Still running: it cannot be verified.
+          kill -0 "$pid" 2>/dev/null && return 2
+          return 1
+        fi
         if grep -Eq '(^|[ /])amq([^[:alnum:]_.-]|.*[[:space:]])wake([[:space:]]|$)' <<<"$command_line"; then
           return 0
         fi
       fi
       ;;
     2)
-      return 0
+      return 2
       ;;
   esac
   return 1

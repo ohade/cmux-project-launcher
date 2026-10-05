@@ -24,9 +24,9 @@ Create-project flow:
   any of Claude Code, Codex, Grok, Gemini and Codex on Cursor. See
   [Agents](#agents).
 - Initializes a new AMQ room and every chosen agent's mailbox before cmux starts
-  any agent. Existing configured rooms are left untouched only after AMQ's read-only
-  doctor validates the config and mailboxes; unhealthy rooms fail before cmux
-  creates a workspace.
+  any agent. An existing room is checked with AMQ's read-only doctor first, and an
+  unhealthy room fails before anything changes. A healthy room is changed only to
+  add a chosen agent it lacks (see [Agents](#agents)), and is checked again after.
 - Serializes launches of the same project, so concurrent invocations cannot
   initialize the same room or create duplicate cmux workspaces.
 - Names the underlying Claude conversation `claude-<session>` at boot and
@@ -57,7 +57,12 @@ The **Agents** menu chooses the agents for the selected project, and
 **Settings** sets the default. All chosen agents join one AMQ room.
 
 - A project with no choice of its own keeps its existing room's agents. A new
-  room starts with the Settings default: Claude Code + Grok unless changed.
+  room starts with the Settings default: Claude Code + Grok unless changed. The
+  room is the one the project's workspace uses, which can be a suffixed one such
+  as `<project>-2`. A room that lists no agent the launcher can start stops the
+  launch until the project gets a choice of its own.
+- With no choice, the Agents button shows the default's badges faded and
+  labelled "Default", because an existing room may have other agents.
 - A chosen agent the room lacks is added to the room before any pane starts.
   When the project's workspace is already live, the launcher adds a pane for
   that agent there and leaves the running agents alone.
@@ -73,7 +78,13 @@ The **Agents** menu chooses the agents for the selected project, and
   `agents` is not grown, because `amq init --force` would drop those keys.
 
 From the command line, `CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok` chooses the
-agents and `CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS` sets them for a new room.
+agents and `CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS` sets them for a new room. The
+app always passes its Settings default; a command-line launch without
+`CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS` gives a new room Claude Code + Codex.
+
+Rolling back to a launcher from before agent choice: that launcher requires
+Codex and Claude mailboxes, so it refuses rooms created without one of them,
+such as a Claude Code + Grok room.
 
 ## Requirements
 

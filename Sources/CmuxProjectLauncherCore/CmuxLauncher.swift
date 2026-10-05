@@ -141,14 +141,14 @@ public struct CmuxLauncher: Sendable {
         guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
             throw CmuxLauncherError.scriptMissing(scriptPath)
         }
-        let agentEnvironment = Self.agentEnvironment(agents: agents, defaultAgents: defaultAgents)
+        let launchConfiguration = Self.agentEnvironment(agents: agents, defaultAgents: defaultAgents)
         return try run(
             executablePath: scriptPath,
             arguments: [project],
-            environment: agentEnvironment.overrides.merging([
+            environment: launchConfiguration.overrides.merging([
                 "CMUX_PROJECT_LAUNCHER_CMUX": cmuxPath,
             ]) { _, launcherValue in launcherValue },
-            removingEnvironment: agentEnvironment.removing
+            removingEnvironment: launchConfiguration.removing
         )
     }
 
@@ -220,14 +220,14 @@ public struct CmuxLauncher: Sendable {
         // Route ad-hoc through the launch script in --no-start mode so the scratch
         // workspace gets the same session renaming (Claude via `--name` at boot, Codex
         // via post-boot `/rename`) as a project launch, without sending /start.
-        let agentEnvironment = Self.agentEnvironment(agents: nil, defaultAgents: defaultAgents)
+        let launchConfiguration = Self.agentEnvironment(agents: nil, defaultAgents: defaultAgents)
         let output = try run(
             executablePath: scriptPath,
             arguments: ["--no-start", name],
-            environment: agentEnvironment.overrides.merging([
+            environment: launchConfiguration.overrides.merging([
                 "CMUX_PROJECT_LAUNCHER_CMUX": cmuxPath,
             ]) { _, launcherValue in launcherValue },
-            removingEnvironment: agentEnvironment.removing
+            removingEnvironment: launchConfiguration.removing
         )
         return output.isEmpty ? "Launched ad-hoc workspace \(name)" : output
     }
