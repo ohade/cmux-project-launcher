@@ -574,6 +574,40 @@ grep -Fq 'coopcc display-2' "$create_log"
 grep -Fq 'using AMQ session display-2' "$stdout_log"
 [[ ! -s "$close_log" ]]
 
+# Session allocation counts every agent's live wake, not only Codex's and
+# Claude's: a room whose only live wake is Grok's is in use, so create takes
+# the next session (the shared check widened with the Agents multi-select).
+: >"$send_log"
+: >"$key_log"
+: >"$create_log"
+: >"$close_log"
+rm -f "$fake_progress/progress__display.md"
+mkdir -p "$tmp_dir/wake-bin" "$tmp_dir/amq-root/display/agents/grok"
+printf '#!/usr/bin/env bash\nsleep 120\n' >"$tmp_dir/wake-bin/amq"
+chmod +x "$tmp_dir/wake-bin/amq"
+"$tmp_dir/wake-bin/amq" wake </dev/null >/dev/null 2>&1 &
+grok_wake_pid=$!
+printf '{"pid":%s}\n' "$grok_wake_pid" >"$tmp_dir/amq-root/display/agents/grok/.wake.lock"
+create_grok_status=0
+CMUX_FAKE_EXPECT_SESSION=display-2 \
+CMUX_FAKE_SEND_LOG="$send_log" \
+CMUX_FAKE_KEY_LOG="$key_log" \
+CMUX_FAKE_CREATE_LOG="$create_log" \
+CMUX_FAKE_CLOSE_LOG="$close_log" \
+CMUX_FAKE_PROGRESS_ROOT="$fake_progress" \
+CMUX_FAKE_AMQ_ROOT="$tmp_dir/amq-root" \
+CMUX_PROJECT_LAUNCHER_CMUX="$fake_cmux" \
+CMUX_PROJECT_LAUNCHER_AMQ="$fake_amq" \
+CMUX_PROJECT_LAUNCHER_PROGRESS_ROOT="$fake_progress" \
+CMUX_PROJECT_LAUNCHER_POLL=1 \
+  $create_bash "$repo_root/bin/cmux-project-create" --mode create --project display --brief-file "$brief_file" >"$stdout_log" \
+  || create_grok_status=$?
+kill "$grok_wake_pid" 2>/dev/null || true
+rm -f "$tmp_dir/amq-root/display/agents/grok/.wake.lock"
+[[ "$create_grok_status" -eq 0 ]]
+[[ "$(cut -f1 "$create_log")" == "display-2" ]]
+grep -Fq 'using AMQ session display-2' "$stdout_log"
+
 : >"$send_log"
 : >"$key_log"
 : >"$create_log"

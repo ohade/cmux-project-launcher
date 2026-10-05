@@ -730,6 +730,11 @@ JSON
       esac
     done
     printf 'close-surface\t%s\n' "$surface" >>"${CMUX_FAKE_EVENT_LOG:?}"
+    # CMUX_FAKE_CLOSE_SURFACE_FAIL lists surfaces that refuse to close.
+    if [[ ",${CMUX_FAKE_CLOSE_SURFACE_FAIL:-}," == *",$surface,"* ]]; then
+      printf 'ERROR: fixture close-surface failed for %s\n' "$surface" >&2
+      exit 1
+    fi
     printf 'OK\n'
     ;;
   focus-pane|refresh-surfaces)
@@ -862,6 +867,10 @@ JSON
       IFS="$old_ifs"
       config_agents="$(printf '%s' "$agents" | sed 's/,/","/g')"
       printf '{"agents":["%s"]}\n' "$config_agents" >"$root/meta/config.json"
+      # Negative control for the queued-mail check: an init that loses mail.
+      if [[ "${CMUX_FAKE_AMQ_INIT_WIPES_INBOX:-0}" == "1" ]]; then
+        find "$root/agents" -path '*/inbox/new/*' -type f -delete
+      fi
     fi
     printf 'init\t%s\t%s%s\n' "$root" "$agents" "$force" >>"${CMUX_FAKE_EVENT_LOG:?}"
     ;;
@@ -1045,8 +1054,15 @@ case "${CMUX_FAKE_AGENT_PROCESS_MODE:-ready}:$tty" in
   ready:ttys028)
     printf '/Users/example/.local/bin/agent --model grok-4.7-xhigh\n'
     ;;
+  # coopgemini runs Gemini by its resolved path, so the live node process names
+  # gemini.js inside the gemini-cli package, not a bare "gemini" (2026-10-05).
+  # CMUX_FAKE_GEMINI_PROCESS=symlink is a Gemini started through the gemini symlink.
   ready:ttys029)
-    printf 'node /opt/homebrew/bin/gemini\n'
+    if [[ "${CMUX_FAKE_GEMINI_PROCESS:-coop}" == "symlink" ]]; then
+      printf 'node /opt/homebrew/bin/gemini\n'
+    else
+      printf 'node /opt/homebrew/lib/node_modules/@google/gemini-cli/bundle/gemini.js\n'
+    fi
     ;;
   ready:ttys030)
     printf 'cursor-agent --model gpt-5.6-sol-xhigh\n'
@@ -1092,6 +1108,20 @@ setup_fake_wakes() {
   done
   export CMUX_FAKE_WAKE_SESSION="$session"
   unset CMUX_FAKE_WAKE_COMMAND_ROOT
+}
+
+# start_fake_amq_wake <lock-file> [wake arg...]: start a fake `amq wake` whose
+# command line passes the launcher's live-wake check (setup_fake_wakes' sleep
+# processes do not), write its pid into <lock-file>, and set fake_wake_pid.
+fake_wake_pid=""
+start_fake_amq_wake() {
+  local lock="$1"
+  shift
+  mkdir -p "$(dirname "$lock")"
+  "$fake_amq" wake "$@" </dev/null >/dev/null 2>&1 &
+  fake_wake_pid=$!
+  background_pids+=("$fake_wake_pid")
+  printf '{"pid":%s}\n' "$fake_wake_pid" >"$lock"
 }
 
 cat >"$fake_open" <<'SH'
@@ -3050,16 +3080,8 @@ grep -Fq 'Launched demo-project in workspace:10 using AMQ session demo-project-3
 : >"$open_log"
 : >"$close_log"
 rm -rf "$fake_amq_root/demo-project" "$fake_amq_root/demo-project-2"
-mkdir -p "$fake_amq_root/demo-project/agents/codex"
-mkdir -p "$fake_amq_root/demo-project-2/agents/claude"
-"$fake_amq" wake --root "$fake_amq_root/demo-project" &
-wake_pid_codex=$!
-background_pids+=("$wake_pid_codex")
-printf '{"pid":%s}\n' "$wake_pid_codex" >"$fake_amq_root/demo-project/agents/codex/.wake.lock"
-"$fake_amq" wake --root "$fake_amq_root/demo-project-2" &
-wake_pid_claude=$!
-background_pids+=("$wake_pid_claude")
-printf '{"pid":%s}\n' "$wake_pid_claude" >"$fake_amq_root/demo-project-2/agents/claude/.wake.lock"
+start_fake_amq_wake "$fake_amq_root/demo-project/agents/codex/.wake.lock" --root "$fake_amq_root/demo-project"
+start_fake_amq_wake "$fake_amq_root/demo-project-2/agents/claude/.wake.lock" --root "$fake_amq_root/demo-project-2"
 CMUX_FAKE_EXPECT_SESSION=demo-project-3 \
   CMUX_FAKE_SEND_LOG="$send_log" \
   CMUX_FAKE_KEY_LOG="$key_log" \
@@ -3396,8 +3418,10 @@ make_fake_room() {
 
 # room_case <project> [VAR=value]...: launch <project> with the fake binaries and
 # the given extra environment, which overrides the defaults below; stdout,
-# stderr, the layout and the exit status are kept.
+# stderr, the layout and the exit status are kept. Flags in room_case_flags
+# (for example --no-start) go before the project.
 room_case_status=0
+room_case_flags=()
 room_case() {
   local project="$1"
   shift
@@ -3425,7 +3449,8 @@ room_case() {
     CMUX_PROJECT_LAUNCHER_POLL=1 \
     CMUX_PROJECT_LAUNCHER_WAIT=0 \
     "$@" \
-    $launch_bash "$repo_root/bin/cmux-project-launch" "$project" >"$stdout_log" 2>"$tmp_dir/stderr.log" || room_case_status=$?
+    $launch_bash "$repo_root/bin/cmux-project-launch" ${room_case_flags[@]+"${room_case_flags[@]}"} "$project" \
+    >"$stdout_log" 2>"$tmp_dir/stderr.log" || room_case_status=$?
 }
 
 # A new room starts with the app's Settings default.
@@ -3723,11 +3748,8 @@ grep -Fxq $'retire\tgrok' "$event_log"
 # wake would be a second one for the same agent.
 make_fake_room "$fake_amq_root/live-stale-wake" claude grok user
 setup_fake_wakes live-stale-wake claude
-"$fake_amq" wake </dev/null >/dev/null 2>&1 &
-stale_wake_pid=$!
-background_pids+=("$stale_wake_pid")
-printf '{"pid":%s,"root":"%s","agent":"grok"}\n' "$stale_wake_pid" "$fake_amq_root/live-stale-wake" \
-  >"$fake_amq_root/live-stale-wake/agents/grok/.wake.lock"
+start_fake_amq_wake "$fake_amq_root/live-stale-wake/agents/grok/.wake.lock"
+stale_wake_pid="$fake_wake_pid"
 room_case live-stale-wake "${live_room_args[@]}" CMUX_FAKE_AGENT_ROSTER=claude
 [[ "$room_case_status" -eq 1 ]]
 grep -Fq 'Grok' "$tmp_dir/stderr.log"
@@ -3936,5 +3958,107 @@ if (( helper_deadline_elapsed >= 14 )); then
   printf 'two never-attaching helpers took %ss; they should share one 8s deadline\n' "$helper_deadline_elapsed" >&2
   exit 1
 fi
+
+# --- Cases from the 2026-10-05 audit, round 2 ---
+
+# A project whose workspace is gone has every startable agent's detached wake
+# retired, chosen or not. Retiring only the chosen agents left another agent's
+# wake injecting into a closed pane, and that wake then blocked re-adding it.
+make_fake_room "$fake_amq_root/detached-subset" claude codex user
+setup_fake_wakes detached-subset claude
+start_fake_amq_wake "$fake_amq_root/detached-subset/agents/codex/.wake.lock"
+room_case detached-subset CMUX_PROJECT_LAUNCHER_AGENTS=claude CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_KEEPALIVE_MODE=success
+grep -Eq $'^retire\t(.*,)?codex(,.*)?$' "$event_log"
+grep -Eq $'^retire\t(.*,)?claude(,.*)?$' "$event_log"
+grep -Fq 'Retired its detached wakes' "$tmp_dir/stderr.log"
+[[ "$room_case_status" -eq 0 ]]
+
+# coopgemini runs Gemini by its resolved path (.../gemini-cli/bundle/gemini.js),
+# so a healthy Gemini pane shows no bare "gemini" word. The reattach check must
+# still see it: it refused every relaunch of a project with a Gemini pane.
+make_fake_room "$fake_amq_root/live-five-coop" claude codex grok gemini cursorcodex user
+setup_fake_wakes live-five-coop
+"$fake_helper_wake" live-five-coop grok 33333333-3333-4333-8333-333333333333
+"$fake_helper_wake" live-five-coop gemini 44444444-4444-4444-8444-444444444444
+"$fake_helper_wake" live-five-coop cursorcodex 55555555-5555-4555-8555-555555555555
+room_case live-five-coop "${live_room_args[@]}" CMUX_FAKE_AGENT_ROSTER=codex,claude,grok,gemini,cursorcodex
+[[ "$room_case_status" -eq 0 ]]
+grep -Fq 'Reattached live-five-coop in workspace:7 using AMQ session live-five-coop' "$stdout_log"
+# A Gemini started through the gemini symlink still counts too.
+room_case live-five-coop "${live_room_args[@]}" CMUX_FAKE_AGENT_ROSTER=codex,claude,grok,gemini,cursorcodex CMUX_FAKE_GEMINI_PROCESS=symlink
+[[ "$room_case_status" -eq 0 ]]
+grep -Fq 'Reattached live-five-coop in workspace:7 using AMQ session live-five-coop' "$stdout_log"
+
+# An added Codex whose wake attach is refused is closed again and retired: a
+# pane with no wake would make every later launch refuse the workspace.
+make_fake_room "$fake_amq_root/live-codex-refused" claude user
+setup_fake_wakes live-codex-refused claude
+room_case live-codex-refused "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,codex CMUX_FAKE_REATTACH_MODE=refuse-codex CMUX_FAKE_KEEPALIVE_MODE=success
+[[ "$room_case_status" -eq 1 ]]
+grep -Fxq $'close-surface\tsurface:26' "$event_log"
+grep -Fxq $'retire\tcodex' "$event_log"
+[[ ! -s "$close_log" ]]
+[[ ! -s "$send_log" ]]
+
+# When one added pane cannot be closed, the agents whose panes did close are
+# still retired, and the launcher names the wake it left alone. The readiness
+# error points at the launcher's own log, wherever CMUX_PROJECT_LAUNCHER_LOG puts it.
+make_fake_room "$fake_amq_root/live-grow-close-fails" claude user
+setup_fake_wakes live-grow-close-fails claude
+room_case live-grow-close-fails "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok,gemini CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,grok,gemini CMUX_FAKE_HELPER_WAKE_SKIP=grok,gemini CMUX_FAKE_CLOSE_SURFACE_FAIL=surface:29 CMUX_FAKE_KEEPALIVE_MODE=success
+[[ "$room_case_status" -eq 1 ]]
+grep -Fxq $'close-surface\tsurface:28' "$event_log"
+grep -Fxq $'close-surface\tsurface:29' "$event_log"
+grep -Fxq $'retire\tgrok' "$event_log"
+grep -Fq "Did not retire gemini's AMQ wake: its pane surface:29 is still open" "$tmp_dir/stderr.log"
+grep -Fq "$diagnostics_log" "$tmp_dir/stderr.log"
+if grep -Fq 'Library/Logs/CmuxProjectLauncher/launcher.log' "$tmp_dir/stderr.log"; then
+  printf 'the readiness error named the default log path, not the configured one\n' >&2
+  exit 1
+fi
+
+# The queued-mail check can fail: an init that drops queued mail changes the
+# inbox, so room-grows-mail would catch a growth that loses mail.
+if [[ -z "${CMUX_PROJECT_LAUNCHER_REAL_AMQ:-}" ]]; then
+  make_fake_room "$fake_amq_root/room-loses-mail" claude user
+  printf 'queued before growth\n' >"$fake_amq_root/room-loses-mail/agents/claude/inbox/new/queued-1.md"
+  queued_before="$(ls "$fake_amq_root/room-loses-mail/agents/claude/inbox/new")"
+  room_case room-loses-mail CMUX_PROJECT_LAUNCHER_AGENTS=claude,codex CMUX_FAKE_EXPECT_ROSTER=claude,user,codex CMUX_FAKE_AMQ_INIT_WIPES_INBOX=1
+  [[ "$(ls "$fake_amq_root/room-loses-mail/agents/claude/inbox/new")" != "$queued_before" ]]
+fi
+
+# A fallback room, opened because the project's own room could not be retired,
+# starts with the project room's agents, not the Settings default (owner
+# decision, 2026-10-05).
+make_fake_room "$fake_amq_root/fallback-room" claude grok user
+start_fake_amq_wake "$fake_amq_root/fallback-room/agents/claude/.wake.lock"
+room_case fallback-room CMUX_FAKE_EXPECT_SESSION=fallback-room-2 CMUX_FAKE_AGENT_ROSTER=claude,grok CMUX_FAKE_EXPECT_ROSTER=claude,grok,user CMUX_PROJECT_LAUNCHER_DEFAULT_AGENTS=codex
+grep -Fxq $'init\t'"$fake_amq_root/fallback-room-2"$'\tclaude,grok,user' "$event_log"
+[[ "$room_case_status" -eq 0 ]]
+
+# A --no-start growth reports the pane it added, not a launched workspace.
+make_fake_room "$fake_amq_root/live-grow-nostart" claude user
+setup_fake_wakes live-grow-nostart claude
+room_case_flags=(--no-start)
+room_case live-grow-nostart "${live_room_args[@]}" CMUX_PROJECT_LAUNCHER_AGENTS=claude,grok CMUX_FAKE_AGENT_ROSTER=claude CMUX_FAKE_EXPECT_ROSTER=claude,user,grok
+room_case_flags=()
+[[ "$room_case_status" -eq 0 ]]
+grep -Fq 'Added Grok to live-grow-nostart in workspace:7 using AMQ session live-grow-nostart' "$stdout_log"
+if grep -Fq 'Launched ad-hoc workspace' "$stdout_log"; then
+  printf 'a --no-start growth claimed it launched a workspace\n' >&2
+  exit 1
+fi
+
+# --room-agents prints the agents this launcher can start that the project's
+# room lists, in roster order, and an empty line for a project with no room.
+# The app starts a project's first choice from it (owner decision, 2026-10-05).
+make_fake_room "$fake_amq_root/room-query" grok fable claude user
+: >"$event_log"
+room_agents_out="$($launch_bash "$repo_root/bin/cmux-project-launch" --room-agents room-query)"
+[[ "$room_agents_out" == "claude,grok" ]]
+room_agents_out="$($launch_bash "$repo_root/bin/cmux-project-launch" --room-agents no-such-room)"
+[[ -z "$room_agents_out" ]]
+[[ ! -s "$event_log" ]]
+[[ ! -e "$fake_amq_root/no-such-room" ]]
 
 printf 'ok - cmux project launch shell fixtures passed\n'

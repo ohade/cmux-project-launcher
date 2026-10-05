@@ -259,9 +259,17 @@ bin/cmux-project-create --mode create \
   its exact surface. Until every such wake is confirmed, no start prompt goes
   to any agent.
 - Adding a pane to a live workspace never closes that workspace. If the new
-  agent fails its checks, only the added pane is closed and only that agent is
-  retired. A missing pane is not re-added while its agent still has a live
-  wake, because the new pane would get a second wake.
+  agent never gets its wake (it fails readiness, or its wake attach is
+  refused), only the added pane is closed and only that agent is retired. A
+  pane that cannot be closed keeps its agent's wake, and the launcher says so.
+  A later failure (rename, backlog doorbell, a stuck dialog) keeps the pane, as
+  a new workspace is kept, and says what failed. A missing pane is not re-added
+  while its agent still has a live wake, because the new pane would get a
+  second wake.
+- A project whose workspace is gone has every startable agent's detached wake
+  in its room retired before the room is reused, not only the chosen agents'.
+  If that room cannot be retired, the fallback room (`<project>-2`, …) starts
+  with the same agents when the project has no choice of its own.
 - Create success requires both a progress-file content change and a new local
   update commit after the scaffold baseline.
 - Temporary create/draft files are written under Application Support with

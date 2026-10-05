@@ -4,6 +4,7 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage: cmux-project-launch [--no-start] <project>
+       cmux-project-launch --room-agents <project>
 
 Creates a cmux workspace with one pane per chosen agent (by default Codex and
 Claude; see CMUX_PROJECT_LAUNCHER_AGENTS below), names each Codex and Claude
@@ -17,6 +18,10 @@ the sessions are renamed, but neither /start is sent. In that mode the workspace
 the deliverable: readiness and rename are best-effort and never discard the
 workspace on failure. A ready agent still gets its exact AMQ wake, and an agent
 left without one fails the launch (non-zero exit) while the workspace is kept.
+
+With --room-agents nothing is launched: it prints the agents this launcher can
+start that the project's AMQ room lists (comma-separated), or an empty line when
+the project has no room.
 
 CMUX_PROJECT_LAUNCHER_AGENTS chooses the agents, one pane each (up to five). Only
 Codex and Claude are named, attached and started as above. Grok, Gemini and Codex
@@ -75,6 +80,7 @@ USAGE
 }
 
 no_start=0
+room_agents_query=0
 positional=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -84,6 +90,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-start)
       no_start=1
+      shift
+      ;;
+    --room-agents)
+      room_agents_query=1
       shift
       ;;
     --)
@@ -147,7 +157,9 @@ workspace_ref=""
 grow_workspace_ref=""
 grow_amq_session=""
 growing_workspace=0
+# Panes this run added, and (same index) the agent each was added for.
 grow_added_surfaces=()
+grow_added_surface_agents=()
 launch_ok=0
 reuse_project_session=0
 project_lock_file=""
@@ -156,6 +168,29 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/lib/cmux-project-common.sh
 source "$script_dir/lib/cmux-project-common.sh"
+
+# --room-agents: read-only. Prints the agents this launcher can start that the
+# project's AMQ room lists, comma-separated in roster order, or an empty line
+# when the project has no room. The app starts a project's first agent choice
+# from it (owner decision, 2026-10-05).
+if [[ "$room_agents_query" -eq 1 ]]; then
+  if ! amq_base_root="$(resolve_amq_base_root)" || [[ -z "$amq_base_root" ]]; then
+    echo "Could not resolve the AMQ base root to read room $project." >&2
+    exit 1
+  fi
+  room_config="$amq_base_root/$project/meta/config.json"
+  room_handles=""
+  room_known=""
+  if [[ -f "$room_config" ]] && room_handles="$(room_agent_handles "$room_config")"; then
+    for agent in "${known_agents_roster[@]}"; do
+      if grep -Fxq -- "$agent" <<<"$room_handles"; then
+        room_known="${room_known:+$room_known,}$agent"
+      fi
+    done
+  fi
+  printf '%s\n' "$room_known"
+  exit 0
+fi
 
 # Stored as $codex_ready_regex and $claude_ready_regex; the pipeline reads them per
 # agent through agent_var_get.
@@ -252,21 +287,32 @@ cleanup_failed_workspace() {
   local close_output=""
   local cleanup_agents=""
   local added_surface
-  local added_closed=1
+  local added_agent
+  local open_agents=","
+  local index
   trap - EXIT
   if [[ "$status" -ne 0 && "$launch_ok" -ne 1 && -n "${workspace_ref:-}" && "$keep_failed_workspace" != "1" && "$keep_failed_workspace" != "true" ]]; then
     if [[ "$growing_workspace" -eq 1 ]]; then
       # Growth never closes the live workspace. Only the panes this run added
-      # are closed, and only the agents added to them are retired.
+      # are closed, and only the agents added to them are retired. An agent
+      # whose pane stays open keeps its wake: retiring it would cut off a
+      # pane that is still there.
       if [[ "${#grow_added_surfaces[@]}" -gt 0 ]]; then
-        for added_surface in "${grow_added_surfaces[@]}"; do
+        for index in "${!grow_added_surfaces[@]}"; do
+          added_surface="${grow_added_surfaces[$index]}"
+          added_agent="${grow_added_surface_agents[$index]}"
           if ! close_output="$("$cmux_bin" close-surface --workspace "$workspace_ref" --surface "$added_surface" 2>&1)"; then
             echo "Failed to close the added pane $added_surface in $workspace_ref: $close_output" >&2
-            added_closed=0
+            echo "Did not retire $added_agent's AMQ wake: its pane $added_surface is still open." >&2
+            open_agents="$open_agents$added_agent,"
           fi
         done
-        if [[ "$added_closed" -eq 1 && -n "${amq_session:-}" ]]; then
-          retire_amq_session "$amq_session" "$launch_retire_csv" || \
+        for added_agent in "${launch_agents[@]}"; do
+          [[ "$open_agents" == *",$added_agent,"* ]] && continue
+          cleanup_agents="${cleanup_agents:+$cleanup_agents,}$added_agent"
+        done
+        if [[ -n "$cleanup_agents" && -n "${amq_session:-}" ]]; then
+          retire_amq_session "$amq_session" "$cleanup_agents" || \
             echo "Failed to retire AMQ wakes for the agents added to session $amq_session; the defect remains unresolved." >&2
         fi
       fi
@@ -607,8 +653,23 @@ retire_amq_session() {
   return 1
 }
 
+# A session with no workspace has only detached wakes, chosen or not, so every
+# agent the room lists that this launcher can start is retired, on top of the
+# chosen ones. Retiring only the chosen agents left another agent's wake
+# injecting into a closed pane (2026-10-05 audit).
 retire_missing_workspace_session() {
-  retire_amq_session "$project" "$launch_retire_csv"
+  local config="$amq_base_root/$project/meta/config.json"
+  local retire_csv="$launch_retire_csv"
+  local handles=""
+  local handle
+  if [[ -f "$config" ]] && handles="$(room_agent_handles "$config")"; then
+    while IFS= read -r handle; do
+      [[ -n "$handle" ]] || continue
+      agent_field "$handle" surface_name >/dev/null || continue
+      [[ ",$retire_csv," == *",$handle,"* ]] || retire_csv="$retire_csv,$handle"
+    done <<<"$handles"
+  fi
+  retire_amq_session "$project" "$retire_csv"
 }
 
 allocate_amq_session() {
@@ -882,8 +943,10 @@ if [[ -n "$grow_workspace_ref" ]]; then
   amq_session="$grow_amq_session"
 else
   amq_session="$(allocate_amq_session)"
-  # A new workspace can get a suffixed room; that room decides its agents too.
-  if [[ "$amq_session" != "$project" ]]; then
+  # A new workspace can get a suffixed room. An existing one decides its
+  # agents; a new one is a fallback for the project's own room and keeps the
+  # agents already resolved from it (owner decision, 2026-10-05).
+  if [[ "$amq_session" != "$project" && -f "$amq_base_root/$amq_session/meta/config.json" ]]; then
     resolve_launch_agents "$amq_session"
   fi
 fi
@@ -1089,6 +1152,7 @@ add_agent_pane() {
   # with output we cannot parse is still closed if the growth fails.
   if [[ -n "$added_surface" ]]; then
     grow_added_surfaces+=("$added_surface")
+    grow_added_surface_agents+=("$agent")
   fi
   if [[ "$added_output" != OK* || -z "$added_surface" || -z "$added_pane" ]]; then
     echo "Unexpected cmux new-pane output for $agent_name in $workspace_ref: $added_output" >&2
@@ -1201,8 +1265,8 @@ agent_readiness_error() {
     agent_name="$(agent_field "$agent" surface_name)"
     if [[ "$(agent_field "$agent" startup)" == "helper" ]]; then
       surface_lines="$surface_lines$agent_name surface: $(agent_var_get "$agent" surface), expected: an AMQ wake for $agent on cmux:surface:$(agent_var_get "$agent" surface_id), attached by $(agent_var_get "$agent" launcher)"$'\n'
-      helper_note=$'\n'"A helper-started agent attaches its own wake after its banner appears;
-its coop bootstrap logs the attempt to ~/Library/Logs/CmuxProjectLauncher/launcher.log."
+      helper_note=$'\n'"A helper-started agent attaches its own wake after its banner appears.
+This launcher's log is $diagnostics_log."
     else
       start_commands="${start_commands:+$start_commands or }$(agent_field "$agent" start_command)"
       surface_lines="$surface_lines$agent_name surface: $(agent_var_get "$agent" surface), expected screen regex: $(agent_var_get "$agent" ready_regex)"$'\n'
@@ -1367,7 +1431,9 @@ notify_existing_backlog() {
 
 # In --no-start (ad-hoc) mode the scratch workspace is the deliverable, so once its
 # surfaces resolve we keep it regardless of any later readiness/rename outcome.
-if [[ "$no_start" -eq 1 ]]; then
+# A growth keeps the live workspace anyway; its added panes still follow the
+# rule below that a pane whose agent never got a wake is closed again.
+if [[ "$no_start" -eq 1 && "$growing_workspace" -ne 1 ]]; then
   launch_ok=1
 fi
 
@@ -1434,8 +1500,13 @@ if [[ "${#attach_failed_agents[@]}" -gt 0 ]]; then
   for failed_agent in "${attach_failed_agents[@]}"; do
     echo "Workspace $workspace_ref is live, but exact AMQ wake attachment failed for $failed_agent." >&2
   done
-  launch_ok=1
   echo "Messages remain queued; no start prompts were sent." >&2
+  # A new workspace is kept for inspection. A pane added to a live workspace
+  # is closed again instead: with no wake it would make every later launch
+  # refuse that workspace.
+  if [[ "$growing_workspace" -ne 1 ]]; then
+    launch_ok=1
+  fi
   exit 1
 fi
 
@@ -1517,6 +1588,10 @@ for agent in "${launch_agents[@]}"; do
   fi
 done
 if [[ "$attach_incomplete" -eq 1 ]]; then
+  if [[ "$growing_workspace" -eq 1 ]]; then
+    echo "Closing the panes this launch added to $workspace_ref; the agents already there are unchanged. No start prompts were sent." >&2
+    exit 1
+  fi
   launch_ok=1
   echo "Preserving $workspace_ref, but the launch is incomplete. No start prompts were sent." >&2
   exit 1
@@ -1544,10 +1619,13 @@ if [[ "$no_start" -eq 1 ]]; then
         ;;
     esac
   done
-  if [[ "$naming_complete" -eq 1 ]]; then
-    echo "Launched ad-hoc workspace $amq_session in $workspace_ref (${naming_summary}no /start sent)"
+  if [[ "$naming_complete" -ne 1 ]]; then
+    naming_summary="session naming incomplete; "
+  fi
+  if [[ "$growing_workspace" -eq 1 ]]; then
+    echo "Added $(launch_agent_names) to $project in $workspace_ref using AMQ session $amq_session (${naming_summary}no /start sent)"
   else
-    echo "Launched ad-hoc workspace $amq_session in $workspace_ref (session naming incomplete; no /start sent)"
+    echo "Launched ad-hoc workspace $amq_session in $workspace_ref (${naming_summary}no /start sent)"
   fi
   exit 0
 fi

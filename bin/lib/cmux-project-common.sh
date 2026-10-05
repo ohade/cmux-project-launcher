@@ -88,7 +88,9 @@ agent_field() {
     gemini:surface_name) printf '%s' 'Gemini' ;;
     gemini:startup) printf '%s' 'helper' ;;
     gemini:rename_mode) printf '%s' 'helper' ;;
-    gemini:process_regex) printf '%s' '(^|[[:space:]/])gemini([[:space:]]|$)' ;;
+    # coopgemini runs the resolved .../gemini-cli/bundle/gemini.js, so node's
+    # command line names gemini.js; a Gemini typed by hand shows .../bin/gemini.
+    gemini:process_regex) printf '%s' '(^|[[:space:]/])gemini(\.js)?([[:space:]]|$)' ;;
     cursorcodex:surface_name) printf '%s' 'CursorCodex' ;;
     cursorcodex:startup) printf '%s' 'helper' ;;
     cursorcodex:rename_mode) printf '%s' 'helper' ;;
@@ -1011,7 +1013,9 @@ wait_for_surface_literals() {
 
 agent_activity_marker_regex() {
   local agent="$1"
-  # An agent without its own markers keeps the historical fallback to Claude's.
+  # Only launcher-started agents (Codex, Claude) reach this, and both define
+  # their markers, so the fallback to Claude's is unreachable today. It keeps
+  # the old behaviour for a future launcher-started agent without markers.
   agent_field "$agent" activity_regex || agent_field claude activity_regex
   printf '\n'
 }
