@@ -614,35 +614,10 @@ struct LauncherView: View {
     }
 
     private var agentsMenu: some View {
-        let ownChoice = model.selectedProject.flatMap { model.agentSelection(for: $0.name) }
-        let shown = ownChoice ?? model.defaultAgents
-        return Menu {
-            if ownChoice == nil {
-                Text("Not chosen yet: an existing room keeps its agents; a new room starts with \(model.defaultAgents.title).")
-                Divider()
-            }
-            ForEach(AgentKind.allCases) { agent in
-                Button {
-                    model.toggleAgent(agent)
-                } label: {
-                    if shown.contains(agent) {
-                        Label(agent.title, systemImage: "checkmark")
-                    } else {
-                        Text(agent.title)
-                    }
-                }
-            }
-            Divider()
-            Button("Use Default") {
-                model.clearAgentSelection()
-            }
-            .disabled(ownChoice == nil)
-        } label: {
-            Label("Agents: \(ownChoice?.title ?? "Default")", systemImage: "person.2")
-        }
-        .frame(minWidth: 150, alignment: .leading)
-        .disabled(model.selectedProject == nil || model.listMode == .archive)
-        .fastHelp("Choose which agents the selected project launches with, saved per project. Change the default in Settings.")
+        AgentPickerButton(model: model)
+            .frame(minWidth: 150, alignment: .leading)
+            .disabled(model.selectedProject == nil || model.listMode == .archive)
+            .fastHelp("Choose which agents the selected project launches with, saved per project. Change the default in Settings.")
     }
 
     private var toolbar: some View {
@@ -1060,10 +1035,15 @@ struct AgentSettingsView: View {
         Form {
             Section {
                 ForEach(AgentKind.allCases) { agent in
-                    Toggle(agent.title, isOn: Binding(
+                    Toggle(isOn: Binding(
                         get: { model.defaultAgents.contains(agent) },
                         set: { _ in model.toggleDefaultAgent(agent) }
-                    ))
+                    )) {
+                        HStack(spacing: 8) {
+                            AgentBadge(agent: agent)
+                            Text(agent.title)
+                        }
+                    }
                 }
             } header: {
                 Text("Default agents")
