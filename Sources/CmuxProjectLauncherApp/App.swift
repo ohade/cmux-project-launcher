@@ -79,6 +79,11 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
+    /// Each project's room agents as last read: absent until the first read ends,
+    /// then the room's agents, or nil for no room.
+    @Published private var roomAgents: [String: AgentSelection?] = [:]
+    private var roomAgentReadGenerations: [String: Int] = [:]
+
     private let store: ProgressProjectStore
     private let launcher: CmuxLauncher
     private let agentStore: AgentSelectionStore
@@ -104,11 +109,50 @@ final class LauncherViewModel: ObservableObject {
         agentStore.selection(for: projectName)
     }
 
+    /// Where the picker starts for a project: its own choice, else its room's agents,
+    /// else the Settings default.
+    func agentPickerBase(for projectName: String) -> AgentPickerBase {
+        AgentPickerBase(
+            ownChoice: agentSelection(for: projectName),
+            room: roomAgents[projectName] ?? nil,
+            settingsDefault: defaultAgents
+        )
+    }
+
+    /// True until the project's room has been read once. The picker waits for it, so
+    /// a first tick cannot start from the default while the room has other agents.
+    func isReadingRoomAgents(for projectName: String) -> Bool {
+        roomAgents.index(forKey: projectName) == nil
+    }
+
+    /// Reads which agents the project's room has. A cached answer stays in use while
+    /// a newer read runs, and only the newest read is kept, so a read that started
+    /// before a launch changed the room cannot overwrite the one after it. A failed
+    /// read counts as "no room" and is logged.
+    func refreshRoomAgents(for projectName: String) {
+        let generation = (roomAgentReadGenerations[projectName] ?? 0) + 1
+        roomAgentReadGenerations[projectName] = generation
+        let launcher = self.launcher
+        Task.detached {
+            let room: AgentSelection?
+            do {
+                room = try launcher.roomAgents(project: projectName)
+            } catch {
+                LauncherDiagnostics.record("Could not read the agents of \(projectName)'s room: \(error.localizedDescription)")
+                room = nil
+            }
+            await MainActor.run {
+                guard self.roomAgentReadGenerations[projectName] == generation else { return }
+                self.roomAgents[projectName] = .some(room)
+            }
+        }
+    }
+
     /// Toggles one agent for the selected project. A project without its own choice
-    /// starts from the default.
+    /// starts from its room's agents, or from the default when it has no room.
     func toggleAgent(_ agent: AgentKind) {
-        guard let projectName = selectedProject?.name else { return }
-        let current = agentSelection(for: projectName) ?? defaultAgents
+        guard let projectName = selectedProject?.name, !isReadingRoomAgents(for: projectName) else { return }
+        let current = agentPickerBase(for: projectName).agents
         objectWillChange.send()
         agentStore.setSelection(current.toggling(agent), for: projectName)
     }
@@ -395,11 +439,14 @@ final class LauncherViewModel: ObservableObject {
                         self.reattachedProject = nil
                     }
                     self.statusText = output.isEmpty ? "Launched \(projectName) in cmux" : output
+                    // A launch can create the room or add agents to it.
+                    self.refreshRoomAgents(for: projectName)
                 }
             } catch {
                 await MainActor.run {
                     self.launchingProject = nil
                     self.errorText = error.localizedDescription
+                    self.refreshRoomAgents(for: projectName)
                 }
             }
         }
@@ -1044,6 +1091,8 @@ struct AgentSettingsView: View {
                             Text(agent.title)
                         }
                     }
+                    // A new room needs at least one agent, so the last one stays ticked.
+                    .disabled(model.defaultAgents.agents == [agent])
                 }
             } header: {
                 Text("Default agents")

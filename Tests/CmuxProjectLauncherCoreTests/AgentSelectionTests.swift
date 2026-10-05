@@ -65,6 +65,20 @@ struct AgentSelectionTests {
         #expect(AgentSelectionStore(defaults: defaults).selection(for: "beta")?.csv == "grok")
     }
 
+    // The store is Sendable, so two threads may save choices for different projects
+    // at once. Each save rewrites the whole dictionary; neither may drop the other.
+    @Test func concurrentChoicesForDifferentProjectsAreAllKept() throws {
+        let (defaults, suite) = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AgentSelectionStore(defaults: defaults)
+        let projects = (0..<200).map { "project-\($0)" }
+        DispatchQueue.concurrentPerform(iterations: projects.count) { index in
+            store.setSelection(AgentSelection([.codex]), for: projects[index])
+        }
+        let missing = projects.filter { store.selection(for: $0) == nil }
+        #expect(missing.isEmpty, "lost \(missing.count) of \(projects.count) choices")
+    }
+
     @Test func corruptProjectSelectionReadsAsNoChoice() throws {
         let (defaults, suite) = try isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }

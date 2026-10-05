@@ -79,12 +79,42 @@ public struct AgentSelection: Equatable, Sendable {
     }
 }
 
+/// Where the Agents picker starts for a project: its own choice, else the agents its
+/// room already has, else the Settings default. The first tick saves a choice built
+/// from this, so a project whose room has Codex keeps Codex (owner decision, 2026-10-05).
+public enum AgentPickerBase: Equatable, Sendable {
+    case ownChoice(AgentSelection)
+    case room(AgentSelection)
+    case settingsDefault(AgentSelection)
+
+    public init(ownChoice: AgentSelection?, room: AgentSelection?, settingsDefault: AgentSelection) {
+        if let ownChoice {
+            self = .ownChoice(ownChoice)
+        } else if let room {
+            self = .room(room)
+        } else {
+            self = .settingsDefault(settingsDefault)
+        }
+    }
+
+    public var agents: AgentSelection {
+        switch self {
+        case .ownChoice(let agents), .room(let agents), .settingsDefault(let agents):
+            agents
+        }
+    }
+}
+
 /// Stores the Settings default and each project's own choice in `UserDefaults`.
 /// A project without a stored choice has none: the launch script then keeps an
 /// existing room's agents and uses the default only for a new room.
 public final class AgentSelectionStore: @unchecked Sendable {
     public static let defaultSelectionKey = "defaultAgentSelection"
     public static let projectSelectionsKey = "projectAgentSelections"
+
+    /// Saving one project's choice rewrites the whole dictionary, so two saves at
+    /// once would drop one. The lock is shared because stores can share defaults.
+    private static let projectSelectionsLock = NSLock()
 
     private let defaults: UserDefaults
 
@@ -108,9 +138,11 @@ public final class AgentSelectionStore: @unchecked Sendable {
     }
 
     /// Passing nil clears the project's choice.
-    public func setSelection(_ selection: AgentSelection?, for project: String) {
+    public func setSelection(_ newSelection: AgentSelection?, for project: String) {
+        Self.projectSelectionsLock.lock()
+        defer { Self.projectSelectionsLock.unlock() }
         var stored = defaults.dictionary(forKey: Self.projectSelectionsKey) ?? [:]
-        stored[project] = selection?.csv
+        stored[project] = newSelection?.csv
         defaults.set(stored, forKey: Self.projectSelectionsKey)
     }
 }

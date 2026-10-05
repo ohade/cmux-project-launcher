@@ -152,6 +152,17 @@ public struct CmuxLauncher: Sendable {
         )
     }
 
+    /// The agents the project's AMQ room already has, or nil when it has no room.
+    /// Read-only: the launch script only reads the room's config.
+    public func roomAgents(project: String) throws -> AgentSelection? {
+        try ProgressProjectStore.validateProjectName(project)
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            throw CmuxLauncherError.scriptMissing(scriptPath)
+        }
+        let output = try run(executablePath: scriptPath, arguments: ["--room-agents", project], environment: [:])
+        return AgentSelection(csv: output)
+    }
+
     @discardableResult
     public func requestProjectDraft(_ draft: ProjectCreationDraft, outputURL: URL? = nil) throws -> ProjectCreationDraft {
         let normalized = draft.normalized

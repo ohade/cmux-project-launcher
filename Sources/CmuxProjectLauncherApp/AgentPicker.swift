@@ -42,38 +42,59 @@ struct AgentBadge: View {
     }
 }
 
+extension AgentPickerBase {
+    /// The word the picker button shows before the badges.
+    var label: String {
+        switch self {
+        case .ownChoice: "Agents"
+        case .room: "Room"
+        case .settingsDefault: "Default"
+        }
+    }
+
+    var isOwnChoice: Bool {
+        if case .ownChoice = self { true } else { false }
+    }
+}
+
 /// The toolbar control for the selected project's agents. The button shows the
 /// agents as badges, so it reads without opening anything: the project's own
-/// choice, or else the Settings default, faded and labelled "Default" because an
-/// existing room keeps its own agents. The checkboxes live in a popover rather
-/// than a menu, because a menu closes on every click and the owner wants to tick
-/// several agents in one go (2026-10-05).
+/// choice; else the agents its room already has, faded and labelled "Room"; else
+/// the Settings default, faded and labelled "Default". The checkboxes live in a
+/// popover rather than a menu, because a menu closes on every click and the owner
+/// wants to tick several agents in one go (2026-10-05).
 struct AgentPickerButton: View {
     @ObservedObject var model: LauncherViewModel
     @State private var isPresented = false
 
     var body: some View {
-        let ownChoice = model.selectedProject.flatMap { model.agentSelection(for: $0.name) }
+        let base = model.selectedProject.map { model.agentPickerBase(for: $0.name) }
+            ?? .settingsDefault(model.defaultAgents)
         Button {
             isPresented.toggle()
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "person.2")
-                Text(ownChoice == nil ? "Default" : "Agents")
+                Text(base.label)
                 HStack(spacing: 3) {
-                    ForEach((ownChoice ?? model.defaultAgents).orderedAgents) { agent in
+                    ForEach(base.agents.orderedAgents) { agent in
                         AgentBadge(agent: agent)
                     }
                 }
-                .opacity(ownChoice == nil ? 0.55 : 1)
+                .opacity(base.isOwnChoice ? 1 : 0.55)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
         }
-        .accessibilityLabel("Agents: \(ownChoice?.title ?? "Default, \(model.defaultAgents.title)")")
+        .accessibilityLabel(base.isOwnChoice ? "Agents: \(base.agents.title)" : "Agents: \(base.label), \(base.agents.title)")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             AgentPickerPanel(model: model)
+        }
+        .task(id: model.selectedProject?.name) {
+            if let projectName = model.selectedProject?.name {
+                model.refreshRoomAgents(for: projectName)
+            }
         }
     }
 }
@@ -83,22 +104,31 @@ struct AgentPickerPanel: View {
     @ObservedObject var model: LauncherViewModel
 
     var body: some View {
-        let ownChoice = model.selectedProject.flatMap { model.agentSelection(for: $0.name) }
-        let shown = ownChoice ?? model.defaultAgents
+        let projectName = model.selectedProject?.name
+        let base = projectName.map { model.agentPickerBase(for: $0) } ?? .settingsDefault(model.defaultAgents)
+        let isReadingRoom = projectName.map { model.isReadingRoomAgents(for: $0) } ?? false
         VStack(alignment: .leading, spacing: 10) {
-            if let projectName = model.selectedProject?.name {
+            if let projectName {
                 Text("Agents for \(projectName)")
                     .font(.headline)
             }
-            if ownChoice == nil {
-                Text("Not chosen yet: an existing room keeps its agents, and a new room starts with \(model.defaultAgents.title). Ticking an agent saves a choice for this project.")
+            if isReadingRoom {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Reading the project's room")
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            } else if let note = Self.note(for: base, defaultAgents: model.defaultAgents) {
+                Text(note)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(AgentKind.allCases) { agent in
                 Toggle(isOn: Binding(
-                    get: { shown.contains(agent) },
+                    get: { base.agents.contains(agent) },
                     set: { _ in model.toggleAgent(agent) }
                 )) {
                     HStack(spacing: 8) {
@@ -108,15 +138,28 @@ struct AgentPickerPanel: View {
                 }
                 .toggleStyle(.checkbox)
                 // A launch needs at least one agent, so the last one stays ticked.
-                .disabled(shown.agents == [agent])
+                // The first tick waits for the room, so it starts from the right agents.
+                .disabled(isReadingRoom || base.agents.agents == [agent])
             }
             Divider()
-            Button("Use Default") {
+            // Clearing goes back to the room's agents, or the default for a new room.
+            Button("Clear Choice") {
                 model.clearAgentSelection()
             }
-            .disabled(ownChoice == nil)
+            .disabled(!base.isOwnChoice)
         }
         .padding(14)
         .frame(width: 300, alignment: .leading)
+    }
+
+    private static func note(for base: AgentPickerBase, defaultAgents: AgentSelection) -> String? {
+        switch base {
+        case .ownChoice:
+            nil
+        case .room(let room):
+            "Not chosen yet: this project's room has \(room.title), and a relaunch keeps them. Ticking an agent saves a choice for this project, starting from these."
+        case .settingsDefault:
+            "Not chosen yet: a new room starts with \(defaultAgents.title). Ticking an agent saves a choice for this project."
+        }
     }
 }

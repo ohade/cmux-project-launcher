@@ -61,8 +61,12 @@ The **Agents** menu chooses the agents for the selected project, and
   room is the one the project's workspace uses, which can be a suffixed one such
   as `<project>-2`. A room that lists no agent the launcher can start stops the
   launch until the project gets a choice of its own.
-- With no choice, the Agents button shows the default's badges faded and
-  labelled "Default", because an existing room may have other agents.
+- With no choice, the Agents button reads the project's room
+  (`cmux-project-launch --room-agents <project>`) and shows its agents faded and
+  labelled "Room". A project with no room shows the default's badges faded and
+  labelled "Default". The first tick saves a choice that starts from what the
+  button shows, so a Claude Code + Codex room keeps Codex. **Clear Choice**
+  drops the project's own choice again.
 - A chosen agent the room lacks is added to the room before any pane starts.
   When the project's workspace is already live, the launcher adds a pane for
   that agent there and leaves the running agents alone.
