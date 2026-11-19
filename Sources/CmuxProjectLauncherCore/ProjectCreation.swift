@@ -5,7 +5,7 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
     public var description: String
     public var initialIntent: String
     public var jira: String
-    public var plane: String
+    public var agentlog: String
     public var notes: String
     public var roughPrompt: String
     public var confidence: String
@@ -16,7 +16,7 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
         description: String = "",
         initialIntent: String = "",
         jira: String = "",
-        plane: String = "",
+        agentlog: String = "",
         notes: String = "",
         roughPrompt: String = "",
         confidence: String = "",
@@ -26,7 +26,7 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
         self.description = description
         self.initialIntent = initialIntent
         self.jira = jira
-        self.plane = plane
+        self.agentlog = agentlog
         self.notes = notes
         self.roughPrompt = roughPrompt
         self.confidence = confidence
@@ -38,7 +38,7 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
         case description
         case initialIntent = "initial_intent"
         case jira
-        case plane
+        case agentlog
         case notes
         case roughPrompt = "rough_prompt"
         case confidence
@@ -52,7 +52,7 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
             description: try container.decodeIfPresent(String.self, forKey: .description) ?? "",
             initialIntent: try container.decodeIfPresent(String.self, forKey: .initialIntent) ?? "",
             jira: try container.decodeIfPresent(String.self, forKey: .jira) ?? "",
-            plane: try container.decodeIfPresent(String.self, forKey: .plane) ?? "",
+            agentlog: try container.decodeIfPresent(String.self, forKey: .agentlog) ?? "",
             notes: try container.decodeIfPresent(String.self, forKey: .notes) ?? "",
             roughPrompt: try container.decodeIfPresent(String.self, forKey: .roughPrompt) ?? "",
             confidence: try container.decodeIfPresent(String.self, forKey: .confidence) ?? "",
@@ -70,7 +70,7 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
             initialIntent: initialIntent.trimmingCharacters(in: .whitespacesAndNewlines),
             jira: jira.trimmingCharacters(in: .whitespacesAndNewlines),
-            plane: plane.trimmingCharacters(in: .whitespacesAndNewlines),
+            agentlog: agentlog.trimmingCharacters(in: .whitespacesAndNewlines),
             notes: notes.trimmingCharacters(in: .whitespacesAndNewlines),
             roughPrompt: roughPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
             confidence: confidence.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -81,7 +81,7 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
     }
 
     public var hasAutofillContext: Bool {
-        ![description, initialIntent, jira, plane, notes, roughPrompt]
+        ![description, initialIntent, jira, agentlog, notes, roughPrompt]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .allSatisfy(\.isEmpty)
     }
@@ -99,7 +99,7 @@ public struct ProjectCreationDraft: Codable, Equatable, Sendable {
             description: fill(current.description, generated.description),
             initialIntent: fill(current.initialIntent, generated.initialIntent),
             jira: fill(current.jira, generated.jira),
-            plane: fill(current.plane, generated.plane),
+            agentlog: fill(current.agentlog, generated.agentlog),
             notes: fill(current.notes, generated.notes),
             roughPrompt: fill(current.roughPrompt, generated.roughPrompt),
             confidence: fill(current.confidence, generated.confidence),

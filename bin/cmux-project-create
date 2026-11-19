@@ -203,7 +203,7 @@ write_scaffold_progress() {
 **Schema**: progress/v2
 **Last updated**: $now
 **Status**: Active
-**Plane**: *(none yet)*
+**Agentlog**: *(none yet)*
 **Task State**: *(none yet)*
 **Plan File**: *(none yet)*
 
@@ -299,7 +299,7 @@ schema = {
     "description": "one or two clear sentences",
     "initial_intent": "first concrete step or initial implementation intent",
     "jira": "Jira ticket or URL, empty string if none",
-    "plane": "Plane workspace/issue URL, empty string if none",
+    "agentlog": "Agentlog workspace/issue URL, empty string if none",
     "notes": "short useful notes, empty string if none",
     "confidence": "high|medium|low",
     "unresolved_questions": ["short question if something is missing"],
@@ -381,7 +381,7 @@ result = {
     "description": str(data.get("description") or ""),
     "initial_intent": str(data.get("initial_intent") or ""),
     "jira": str(data.get("jira") or ""),
-    "plane": str(data.get("plane") or ""),
+    "agentlog": str(data.get("agentlog") or ""),
     "notes": str(data.get("notes") or ""),
     "rough_prompt": str(data.get("rough_prompt") or ""),
     "confidence": str(data.get("confidence") or ""),

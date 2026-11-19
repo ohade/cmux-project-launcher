@@ -21,7 +21,7 @@ final class ProgressProjectStoreTests: XCTestCase {
         **Schema**: progress/v2
         **Last updated**: 2026-06-04 12:23
         **Status**: Active
-        **Plane**: `work` / `DEMO`
+        **Agentlog**: `work` / `DEMO`
         **Task State**: demo-task-state.md
 
         ## Resume Card
@@ -48,7 +48,7 @@ final class ProgressProjectStoreTests: XCTestCase {
         XCTAssertEqual(projects.count, 1)
         XCTAssertEqual(projects[0].name, "demo-project")
         XCTAssertEqual(projects[0].status, "Active")
-        XCTAssertEqual(projects[0].plane, "`work` / `DEMO`")
+        XCTAssertEqual(projects[0].agentlog, "`work` / `DEMO`")
         XCTAssertEqual(projects[0].resumeCard, "demo-project - post-production\nNEXT: validate cache behavior.")
         XCTAssertEqual(projects[0].startHere, "Run the validation query.")
         XCTAssertEqual(projects[0].taskStatePath, taskState)
@@ -64,7 +64,7 @@ final class ProgressProjectStoreTests: XCTestCase {
         let newer = ProjectTile(
             name: "newer",
             status: "Active",
-            plane: "x",
+            agentlog: "x",
             lastUpdated: Date(timeIntervalSince1970: 3_000_000_000),
             createdAt: nil,
             resumeCard: "",
@@ -80,7 +80,7 @@ final class ProgressProjectStoreTests: XCTestCase {
         let exactShortName = ProjectTile(
             name: "pr",
             status: "Active",
-            plane: "",
+            agentlog: "",
             lastUpdated: nil,
             createdAt: nil,
             resumeCard: "",
@@ -91,7 +91,7 @@ final class ProgressProjectStoreTests: XCTestCase {
         let productionNoise = ProjectTile(
             name: "billing",
             status: "Active",
-            plane: "",
+            agentlog: "",
             lastUpdated: nil,
             createdAt: nil,
             resumeCard: "Project setup notes",
@@ -108,7 +108,7 @@ final class ProgressProjectStoreTests: XCTestCase {
         let project = ProjectTile(
             name: "billing",
             status: "Active",
-            plane: "",
+            agentlog: "",
             lastUpdated: nil,
             createdAt: nil,
             resumeCard: "Project setup notes",
@@ -271,7 +271,7 @@ final class ProgressProjectStoreTests: XCTestCase {
             description: "Generated description",
             initialIntent: "Generated intent",
             jira: "DEMO-2",
-            plane: "dv/CMUX",
+            agentlog: "dv/CMUX",
             roughPrompt: "Generated context",
             confidence: "high",
             unresolvedQuestions: ["Generated question"]
@@ -283,7 +283,7 @@ final class ProgressProjectStoreTests: XCTestCase {
         XCTAssertEqual(merged.description, "Typed description")
         XCTAssertEqual(merged.initialIntent, "Generated intent")
         XCTAssertEqual(merged.jira, "DEMO-1")
-        XCTAssertEqual(merged.plane, "dv/CMUX")
+        XCTAssertEqual(merged.agentlog, "dv/CMUX")
         XCTAssertEqual(merged.roughPrompt, "Typed context")
         XCTAssertEqual(merged.unresolvedQuestions, ["Generated question"])
     }
@@ -350,7 +350,7 @@ final class ProgressProjectStoreTests: XCTestCase {
           "description": "Build a display flow.",
           "initial_intent": "Create the first UI slice.",
           "jira": "DEMO-1",
-          "plane": "",
+          "agentlog": "",
           "notes": "Keep it small.",
           "confidence": "medium",
           "unresolved_questions": ["Which repo?"]

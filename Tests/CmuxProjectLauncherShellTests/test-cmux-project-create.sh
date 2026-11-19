@@ -42,7 +42,7 @@ cat >"$brief_file" <<'JSON'
   "description": "Build a display flow.",
   "initial_intent": "Create the first UI slice.",
   "jira": "DEMO-1",
-  "plane": "",
+  "agentlog": "",
   "notes": "Keep it small.",
   "rough_prompt": "Infer the missing details."
 }
@@ -64,7 +64,7 @@ Here is the result:
   "description": "Build a display flow.",
   "initial_intent": "Create the first UI slice.",
   "jira": "DEMO-1",
-  "plane": "",
+  "agentlog": "",
   "notes": "Keep it small.",
   "confidence": "high",
   "unresolved_questions": []
@@ -363,7 +363,7 @@ case "$cmd" in
 **Schema**: progress/v2
 **Last updated**: 2026-06-15 12:00
 **Status**: Active
-**Plane**: *(none yet)*
+**Agentlog**: *(none yet)*
 **Task State**: *(none yet)*
 **Plan File**: *(none yet)*
 

@@ -34,7 +34,7 @@ public struct ProjectTile: Identifiable, Equatable, Sendable {
     public var id: String { name }
     public let name: String
     public let status: String
-    public let plane: String
+    public let agentlog: String
     public let lastUpdated: Date?
     public let createdAt: Date?
     public let resumeCard: String
@@ -48,7 +48,7 @@ public struct ProjectTile: Identifiable, Equatable, Sendable {
     public init(
         name: String,
         status: String,
-        plane: String,
+        agentlog: String,
         lastUpdated: Date?,
         createdAt: Date?,
         resumeCard: String,
@@ -61,7 +61,7 @@ public struct ProjectTile: Identifiable, Equatable, Sendable {
     ) {
         self.name = name
         self.status = status
-        self.plane = plane
+        self.agentlog = agentlog
         self.lastUpdated = lastUpdated
         self.createdAt = createdAt
         self.resumeCard = resumeCard
@@ -79,7 +79,7 @@ public struct ProjectTile: Identifiable, Equatable, Sendable {
 
         let primaryFields = [
             name,
-            plane,
+            agentlog,
         ]
         if primaryFields.contains(where: { $0.localizedCaseInsensitiveContains(trimmed) }) {
             return true
@@ -127,7 +127,7 @@ public enum ProjectFixtures {
         ProjectTile(
             name: "search-quality",
             status: "Active",
-            plane: "DEMO-101",
+            agentlog: "DEMO-101",
             lastUpdated: Date(timeIntervalSince1970: 1_780_564_980),
             createdAt: Date(timeIntervalSince1970: 1_780_229_784),
             resumeCard: "search-quality - ranking experiment follow-up\nNEXT: validate the sample report and cache behavior.",
@@ -146,7 +146,7 @@ public enum ProjectFixtures {
         ProjectTile(
             name: "launcher",
             status: "Active",
-            plane: "DEMO-102",
+            agentlog: "DEMO-102",
             lastUpdated: Date(timeIntervalSince1970: 1_778_500_494),
             createdAt: Date(timeIntervalSince1970: 1_778_058_297),
             resumeCard: "launcher - local workflow helper\nNEXT: prove project launch mechanics without patching the terminal app.",
@@ -158,7 +158,7 @@ public enum ProjectFixtures {
         ProjectTile(
             name: "report-refresh",
             status: "Active",
-            plane: "DEMO-103",
+            agentlog: "DEMO-103",
             lastUpdated: Date(timeIntervalSince1970: 1_778_500_494),
             createdAt: Date(timeIntervalSince1970: 1_776_882_643),
             resumeCard: "report-refresh - reporting follow-up\nNEXT: verify reporting state and continue plan.",

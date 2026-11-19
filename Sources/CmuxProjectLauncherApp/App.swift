@@ -758,7 +758,7 @@ struct LauncherView: View {
                     TextField("Search projects", text: $model.query)
                         .textFieldStyle(.roundedBorder)
                         .frame(minWidth: 180, maxWidth: .infinity)
-                        .fastHelp("Filter projects by name, status, Plane, worktree path, resume card, or recent history.")
+                        .fastHelp("Filter projects by name, status, Agentlog, worktree path, resume card, or recent history.")
 
                     Menu {
                         ForEach(ProjectSortMode.allCases) { mode in
@@ -887,7 +887,7 @@ struct LauncherView: View {
                 Text(project.name)
                     .font(.system(size: 24, weight: .semibold))
                 ProjectMetaRow(title: "Status", value: project.status)
-                ProjectMetaRow(title: "Plane", value: project.plane)
+                ProjectMetaRow(title: "Agentlog", value: project.agentlog)
                 ProjectMetaRow(title: "Scope", value: project.workspaceKind.title)
                 if let worktreePath = project.worktreePath {
                     ProjectMetaRow(title: "Worktree", value: worktreePath)
@@ -1180,7 +1180,7 @@ struct ProjectTileView: View {
                     .padding(.top, 5)
             }
 
-            Text(project.plane)
+            Text(project.agentlog)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -1262,10 +1262,10 @@ struct CreationFormView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Plane Workspace or Issue (optional)")
+                Text("Agentlog Workspace or Issue (optional)")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
-                TextField("Workspace or issue", text: $model.createDraft.plane)
+                TextField("Workspace or issue", text: $model.createDraft.agentlog)
                     .textFieldStyle(.roundedBorder)
             }
 

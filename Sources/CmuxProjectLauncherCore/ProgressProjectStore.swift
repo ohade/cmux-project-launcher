@@ -198,7 +198,7 @@ public struct ProgressProjectStore {
             return ProjectTile(
                 name: row.name,
                 status: row.status,
-                plane: row.plane,
+                agentlog: row.agentlog,
                 lastUpdated: Self.parseDate(row.lastUpdated),
                 createdAt: detail?.createdAt ?? Self.fileCreatedDate(for: fileURL),
                 resumeCard: detail?.resumeCard ?? "",
@@ -224,7 +224,7 @@ public struct ProgressProjectStore {
         return ProjectTile(
             name: name,
             status: Self.metadataValue("Status", in: text) ?? "Unknown",
-            plane: Self.metadataValue("Plane", in: text) ?? "*(none)*",
+            agentlog: Self.metadataValue("Agentlog", in: text) ?? "*(none)*",
             lastUpdated: Self.metadataValue("Last updated", in: text).flatMap(Self.parseDate),
             createdAt: createdAt ?? Self.gitCreatedDate(for: url),
             resumeCard: Self.section("Resume Card", in: text),
@@ -682,11 +682,11 @@ private struct StartPrecomputeListResponse: Decodable {
 private struct StartPrecomputeProjectRow: Decodable {
     let name: String
     let status: String
-    let plane: String
+    let agentlog: String
     let lastUpdated: String
 
     private enum CodingKeys: String, CodingKey {
-        case name, status, plane
+        case name, status, agentlog
         case lastUpdated = "last_updated"
     }
 }
